@@ -17,6 +17,21 @@ tasks — without clicking through the Tableau Cloud UI.
   form that builds the correct Tableau Cloud schedule (hourly / daily /
   weekly / monthly) for you.
 
+## How scheduling works
+
+**Every task you create gets its own new schedule — "Add task" never attaches
+to an existing one.**
+
+Tableau Server has shared schedules that many tasks can attach to. Tableau
+Cloud doesn't: each subscription or extract-refresh task carries its own
+private, inline schedule, defined at the moment the task is created. So if
+you want five workbooks refreshed "daily at 6am", you create five separate
+tasks here, each with its own identical 6am-daily schedule — there's no
+shared schedule object to point them at instead. This matches how Tableau
+Cloud itself works (you'll see the same thing in the Tableau Cloud UI:
+schedules only ever appear nested under one task, never as a shared, standalone
+list).
+
 ## Architecture
 
 ```

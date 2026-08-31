@@ -91,6 +91,18 @@ REST API. It is not an official Tableau or Salesforce product.</p></blockquote>
     for you.</li>
 </ul>
 
+<h2>How scheduling works</h2>
+<p><strong>Every task you create gets its own new schedule &mdash; "Add task" never attaches
+to an existing one.</strong></p>
+<p>Tableau Server has shared schedules that many tasks can attach to. Tableau Cloud
+doesn't: each subscription or extract-refresh task carries its own private, inline
+schedule, defined at the moment the task is created. So if you want five workbooks
+refreshed "daily at 6am", you create five separate tasks here, each with its own
+identical 6am-daily schedule &mdash; there's no shared schedule object to point them at
+instead. This matches how Tableau Cloud itself works (you'll see the same thing in the
+Tableau Cloud UI: schedules only ever appear nested under one task, never as a shared,
+standalone list).</p>
+
 <h2>Architecture</h2>
 <pre><code>Browser (index.html + Alpine.js + Pico.css)
    │  GET  /api/jobs, /api/subscriptions, /api/extract-tasks
