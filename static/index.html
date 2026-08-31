@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tableau Cloud Job Manager</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+  <style>
+    table.compact td, table.compact th { padding: 0.4rem 0.6rem; }
+    .tag { padding: 0.1rem 0.5rem; border-radius: 0.4rem; font-size: 0.8rem; }
+    .tag-success { background: #d3f2e0; color: #0d6b3c; }
+    .tag-fail { background: #fbdada; color: #9c1f1f; }
+    .tag-pending { background: #fdf1c7; color: #8a6d1a; }
+    .muted { color: var(--pico-muted-color); font-size: 0.9rem; }
+    nav.tabs a[aria-current="true"] { font-weight: bold; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <main class="container" x-data="app()" x-init="init()">
+    <hgroup>
+      <h1>Tableau Cloud Job Manager</h1>
+      <p class="muted">Read the live job queue, scheduled tasks, and add new tasks &mdash; without leaving this page.</p>
+    </hgroup>
+
+    <template x-if="error">
+      <p><mark x-text="error"></mark></p>
+    </template>
+    <template x-if="notice">
+      <p><ins x-text="notice"></ins></p>
+    </template>
+
+    <nav class="tabs">
+      <ul>
+        <li><a href="#" @click.prevent="view = 'jobs'" :aria-current="view === 'jobs'">Jobs</a></li>
+        <li><a href="#" @click.prevent="view = 'tasks'" :aria-current="view === 'tasks'">Scheduled tasks</a></li>
+        <li><a href="#" @click.prevent="view = 'add'" :aria-current="view === 'add'">Add task</a></li>
+      </ul>
+    </nav>
+
+    <!-- JOBS -->
+    <section x-show="view === 'jobs'">
+      <header style="display:flex; justify-content:space-between; align-items:center;">
+        <h3>Live job queue</h3>
+        <button class="outline" @click="fetchJobs()">Refresh now</button>
+      </header>
+      <p class="muted">Auto-refreshes every 7 seconds.</p>
+      <table class="compact striped">
+        <thead><tr><th>Status</th><th>Type</th><th>Title</th><th>Created</th><th>Started</th><th>Ended</th></tr></thead>
+        <tbody>
+          <template x-for="job in jobs" :key="job.id">
+            <tr>
+              <td><span class="tag" :class="statusTag(job.status)" x-text="job.status || '—'"></span></td>
+              <td x-text="job.type || '—'"></td>
+              <td x-text="job.title || job.subtitle || '—'"></td>
+              <td x-text="job.created_at || '—'"></td>
+              <td x-text="job.started_at || '—'"></td>
+              <td x-text="job.ended_at || '—'"></td>
+            </tr>
+          </template>
+          <tr x-show="jobs.length === 0"><td colspan="6" class="muted">No jobs found.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- SCHEDULED TASKS -->
+    <section x-show="view === 'tasks'">
+      <h3>Subscriptions</h3>
+      <table class="compact striped">
+        <thead><tr><th>Subject</th><th>Target</th><th>Frequency</th><th>Suspended</th></tr></thead>
+        <tbody>
+          <template x-for="s in subscriptions" :key="s.id">
+            <tr>
+              <td x-text="s.subject || '—'"></td>
+              <td x-text="(s.target_type || '?') + ' / ' + (s.target_id || '?')"></td>
+              <td x-text="s.schedule_frequency || '—'"></td>
+              <td x-text="s.suspended ? 'yes' : 'no'"></td>
+            </tr>
+          </template>
+          <tr x-show="subscriptions.length === 0"><td colspan="4" class="muted">No subscriptions found.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Extract refresh tasks</h3>
+      <table class="compact striped">
+        <thead><tr><th>Target</th><th>Frequency</th><th>Last run</th><th>Consecutive failures</th></tr></thead>
+        <tbody>
+          <template x-for="t in extractTasks" :key="t.id">
+            <tr>
+              <td x-text="(t.target_type || '?') + ' / ' + (t.target_id || '?')"></td>
+              <td x-text="t.schedule_frequency || '—'"></td>
+              <td x-text="t.last_run_at || 'never'"></td>
+              <td x-text="t.consecutive_failed_count ?? '—'"></td>
+            </tr>
+          </template>
+          <tr x-show="extractTasks.length === 0"><td colspan="4" class="muted">No extract refresh tasks found.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ADD TASK -->
+    <section x-show="view === 'add'">
+      <h3>Add a task</h3>
+
+      <fieldset>
+        <legend>Task type</legend>
+        <label><input type="radio" value="subscription" x-model="taskType" /> Subscription (email a view/workbook)</label>
+        <label><input type="radio" value="extract" x-model="taskType" /> Extract refresh</label>
+      </fieldset>
+
+      <!-- SUBSCRIPTION FIELDS -->
+      <template x-if="taskType === 'subscription'">
+        <div>
+          <label>Subject
+            <input type="text" x-model="sub.subject" placeholder="e.g. Weekly sales report" />
+          </label>
+          <div class="grid">
+            <label>Content type
+              <select x-model="sub.contentType" @change="sub.contentId = ''">
+                <option value="Workbook">Workbook</option>
+                <option value="View">View</option>
+              </select>
+            </label>
+            <label>Content
+              <select x-model="sub.contentId">
+                <option value="" disabled selected>Choose one&hellip;</option>
+                <template x-for="item in contentOptions" :key="item.id">
+                  <option :value="item.id" x-text="item.name"></option>
+                </template>
+              </select>
+            </label>
+            <label>Send to user
+              <select x-model="sub.userId">
+                <option value="" disabled selected>Choose one&hellip;</option>
+                <template x-for="u in users" :key="u.id">
+                  <option :value="u.id" x-text="u.name"></option>
+                </template>
+              </select>
+            </label>
+          </div>
+        </div>
+      </template>
+
+      <!-- EXTRACT REFRESH FIELDS -->
+      <template x-if="taskType === 'extract'">
+        <div>
+          <div class="grid">
+            <label>Refresh type
+              <select x-model="extract.refreshType">
+                <option value="FullRefresh">Full refresh</option>
+                <option value="IncrementalExtract">Incremental</option>
+              </select>
+            </label>
+            <label>Target type
+              <select x-model="extract.targetType" @change="extract.targetId = ''">
+                <option value="workbook">Workbook</option>
+                <option value="datasource">Data source</option>
+              </select>
+            </label>
+            <label>Target
+              <select x-model="extract.targetId">
+                <option value="" disabled selected>Choose one&hellip;</option>
+                <template x-for="item in targetOptions" :key="item.id">
+                  <option :value="item.id" x-text="item.name"></option>
+                </template>
+              </select>
+            </label>
+          </div>
+        </div>
+      </template>
+
+      <hr />
+      <h4>Schedule</h4>
+      <label>Frequency
+        <select x-model="schedule.frequency">
+          <option value="Hourly">Hourly</option>
+          <option value="Daily">Daily</option>
+          <option value="Weekly">Weekly</option>
+          <option value="Monthly">Monthly</option>
+        </select>
+      </label>
+
+      <!-- HOURLY -->
+      <template x-if="schedule.frequency === 'Hourly'">
+        <div>
+          <p class="muted">Runs once every hour, between a start and end time.</p>
+          <div class="grid">
+            <label>Start <input type="time" step="300" x-model="schedule.start" /></label>
+            <label>End <input type="time" step="300" x-model="schedule.end" /></label>
+          </div>
+          <fieldset>
+            <legend class="muted">Restrict to specific days (optional)</legend>
+            <template x-for="day in weekdayOptions" :key="day">
+              <label style="display:inline-block; margin-right:1rem;">
+                <input type="checkbox" :value="day" x-model="schedule.weekDays" /> <span x-text="day"></span>
+              </label>
+            </template>
+          </fieldset>
+        </div>
+      </template>
+
+      <!-- DAILY -->
+      <template x-if="schedule.frequency === 'Daily'">
+        <div>
+          <div class="grid">
+            <label>Every
+              <select x-model.number="schedule.hours">
+                <template x-for="h in dailyHourOptions" :key="h">
+                  <option :value="h" x-text="h + ' hour(s)'"></option>
+                </template>
+              </select>
+            </label>
+            <label>Start <input type="time" step="300" x-model="schedule.start" /></label>
+            <label x-show="schedule.hours != 24">End <input type="time" step="300" x-model="schedule.end" /></label>
+          </div>
+          <fieldset>
+            <legend class="muted">Restrict to specific days (optional)</legend>
+            <template x-for="day in weekdayOptions" :key="day">
+              <label style="display:inline-block; margin-right:1rem;">
+                <input type="checkbox" :value="day" x-model="schedule.weekDays" /> <span x-text="day"></span>
+              </label>
+            </template>
+          </fieldset>
+        </div>
+      </template>
+
+      <!-- WEEKLY -->
+      <template x-if="schedule.frequency === 'Weekly'">
+        <label>Day of week
+          <select x-model="schedule.weekDay">
+            <option value="" disabled selected>Choose one&hellip;</option>
+            <template x-for="day in weekdayOptions" :key="day">
+              <option :value="day" x-text="day"></option>
+            </template>
+          </select>
+        </label>
+      </template>
+
+      <!-- MONTHLY -->
+      <template x-if="schedule.frequency === 'Monthly'">
+        <div>
+          <fieldset>
+            <label><input type="radio" value="day" x-model="schedule.monthDayMode" /> On a specific day of the month</label>
+            <label><input type="radio" value="occurrence" x-model="schedule.monthDayMode" /> On an occurrence (e.g. third Thursday)</label>
+          </fieldset>
+          <template x-if="schedule.monthDayMode === 'day'">
+            <label>Day of month
+              <select x-model="schedule.monthDay">
+                <option value="LastDay">Last day of month</option>
+                <template x-for="d in 31" :key="d">
+                  <option :value="String(d)" x-text="d"></option>
+                </template>
+              </select>
+            </label>
+          </template>
+          <template x-if="schedule.monthDayMode === 'occurrence'">
+            <div class="grid">
+              <label>Occurrence
+                <select x-model="schedule.monthOccurrence">
+                  <option value="First">First</option>
+                  <option value="Second">Second</option>
+                  <option value="Third">Third</option>
+                  <option value="Fourth">Fourth</option>
+                  <option value="Last">Last</option>
+                </select>
+              </label>
+              <label>Day of week
+                <select x-model="schedule.weekDay">
+                  <option value="" disabled selected>Choose one&hellip;</option>
+                  <template x-for="day in weekdayOptions" :key="day">
+                    <option :value="day" x-text="day"></option>
+                  </template>
+                </select>
+              </label>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <button :disabled="submitting" @click="taskType === 'subscription' ? submitSubscription() : submitExtractTask()">
+        <span x-show="!submitting">Create task</span>
+        <span x-show="submitting" aria-busy="true">Creating&hellip;</span>
+      </button>
+    </section>
+  </main>
+
+  <script>
+    function app() {
+      return {
+        view: 'jobs',
+        jobs: [], subscriptions: [], extractTasks: [],
+        workbooks: [], datasources: [], views: [], users: [],
+        taskType: 'subscription',
+        sub: { subject: '', contentType: 'Workbook', contentId: '', userId: '' },
+        extract: { refreshType: 'FullRefresh', targetType: 'workbook', targetId: '' },
+        schedule: {
+          frequency: 'Daily',
+          start: '09:00', end: '17:00', hours: 4,
+          weekDays: [], weekDay: '',
+          monthDayMode: 'day', monthDay: '1', monthOccurrence: 'Third',
+        },
+        weekdayOptions: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
+        dailyHourOptions: [2, 4, 6, 8, 12, 24],
+        error: '', notice: '', submitting: false,
+
+        async init() {
+          await this.refreshAll();
+          setInterval(() => this.fetchJobs(), 7000);
+        },
+
+        async refreshAll() {
+          await Promise.all([
+            this.fetchJobs(), this.fetchSubscriptions(), this.fetchExtractTasks(),
+            this.fetchWorkbooks(), this.fetchDatasources(), this.fetchViews(), this.fetchUsers(),
+          ]);
+        },
+
+        async fetchJson(url) {
+          const res = await fetch(url);
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || res.statusText);
+          return data;
+        },
+        async fetchJobs() { try { this.jobs = await this.fetchJson('/api/jobs'); } catch (e) { this.error = e.message; } },
+        async fetchSubscriptions() { try { this.subscriptions = await this.fetchJson('/api/subscriptions'); } catch (e) { this.error = e.message; } },
+        async fetchExtractTasks() { try { this.extractTasks = await this.fetchJson('/api/extract-tasks'); } catch (e) { this.error = e.message; } },
+        async fetchWorkbooks() { try { this.workbooks = await this.fetchJson('/api/workbooks'); } catch (e) { this.error = e.message; } },
+        async fetchDatasources() { try { this.datasources = await this.fetchJson('/api/datasources'); } catch (e) { this.error = e.message; } },
+        async fetchViews() { try { this.views = await this.fetchJson('/api/views'); } catch (e) { this.error = e.message; } },
+        async fetchUsers() { try { this.users = await this.fetchJson('/api/users'); } catch (e) { this.error = e.message; } },
+
+        get contentOptions() { return this.sub.contentType === 'Workbook' ? this.workbooks : this.views; },
+        get targetOptions() { return this.extract.targetType === 'workbook' ? this.workbooks : this.datasources; },
+
+        statusTag(status) {
+          if (status === 'Success') return 'tag-success';
+          if (status === 'Failed' || status === 'Cancelled') return 'tag-fail';
+          return 'tag-pending';
+        },
+
+        buildSchedulePayload() {
+          const s = this.schedule;
+          const toHms = (t) => (t ? `${t}:00` : null);
+          const payload = { frequency: s.frequency };
+          if (s.frequency === 'Hourly') {
+            payload.start = toHms(s.start);
+            payload.end = toHms(s.end);
+            payload.hours = 1;
+            if (s.weekDays.length) payload.week_days = s.weekDays;
+          } else if (s.frequency === 'Daily') {
+            payload.start = toHms(s.start);
+            payload.hours = Number(s.hours);
+            if (Number(s.hours) !== 24) payload.end = toHms(s.end);
+            if (s.weekDays.length) payload.week_days = s.weekDays;
+          } else if (s.frequency === 'Weekly') {
+            payload.week_day = s.weekDay;
+          } else if (s.frequency === 'Monthly') {
+            if (s.monthDayMode === 'day') {
+              payload.month_day = s.monthDay;
+            } else {
+              payload.month_occurrence = s.monthOccurrence;
+              payload.week_day = s.weekDay;
+            }
+          }
+          return payload;
+        },
+
+        async postJson(url, body) {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || 'Request failed');
+          return data;
+        },
+
+        async submitSubscription() {
+          this.error = ''; this.notice = ''; this.submitting = true;
+          try {
+            const data = await this.postJson('/api/subscriptions', {
+              subject: this.sub.subject,
+              content_type: this.sub.contentType,
+              content_id: this.sub.contentId,
+              user_id: this.sub.userId,
+              schedule: this.buildSchedulePayload(),
+            });
+            this.notice = `Subscription created (id ${data.id}).`;
+            await this.fetchSubscriptions();
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.submitting = false;
+          }
+        },
+
+        async submitExtractTask() {
+          this.error = ''; this.notice = ''; this.submitting = true;
+          try {
+            const data = await this.postJson('/api/extract-tasks', {
+              refresh_type: this.extract.refreshType,
+              target_type: this.extract.targetType,
+              target_id: this.extract.targetId,
+              schedule: this.buildSchedulePayload(),
+            });
+            this.notice = `Extract refresh task created (id ${data.id}).`;
+            await this.fetchExtractTasks();
+          } catch (e) {
+            this.error = e.message;
+          } finally {
+            this.submitting = false;
+          }
+        },
+      };
+    }
+  </script>
+</body>
+</html>

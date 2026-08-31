@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Tableau Cloud Job Manager — README</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1f2328;
+    --muted: #59636e;
+    --border: #d0d7de;
+    --code-bg: #f6f8fa;
+    --link: #0969da;
+    --accent: #eef6ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e6edf3;
+      --muted: #9198a1;
+      --border: #30363d;
+      --code-bg: #161b22;
+      --link: #4493f8;
+      --accent: #0d1b2e;
+    }
+    body { background: #0d1117; }
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--fg);
+    max-width: 780px;
+    margin: 2.5rem auto;
+    padding: 0 1.5rem 4rem;
+    line-height: 1.6;
+  }
+  h1, h2, h3, h4 { line-height: 1.25; }
+  h1 { font-size: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
+  h2 { font-size: 1.4rem; margin-top: 2.2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { font-size: 1.15rem; margin-top: 1.6rem; }
+  a { color: var(--link); }
+  code {
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.9em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; }
+  blockquote {
+    margin: 1rem 0;
+    padding: 0.6rem 1rem;
+    background: var(--accent);
+    border-left: 4px solid var(--link);
+    border-radius: 4px;
+  }
+  blockquote p { margin: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid var(--border); padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: var(--code-bg); }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: 0.25rem 0; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>Tableau Cloud Job Manager</h1>
+
+<p>A small local web app for reading the live job queue and scheduled tasks on a
+<strong>Tableau Cloud</strong> site, and creating new subscriptions and extract-refresh
+tasks &mdash; without clicking through the Tableau Cloud UI.</p>
+
+<blockquote><p><strong>Note:</strong> This is an independent tool built against the public Tableau
+REST API. It is not an official Tableau or Salesforce product.</p></blockquote>
+
+<h2>What it does</h2>
+<ul>
+  <li><strong>Jobs</strong> &mdash; lists live background jobs (running, pending, succeeded, failed)
+    and auto-refreshes every few seconds.</li>
+  <li><strong>Scheduled tasks</strong> &mdash; lists existing subscriptions and extract-refresh
+    tasks, with their target and schedule.</li>
+  <li><strong>Add task</strong> &mdash; creates a new subscription or extract-refresh task, with a
+    form that builds the correct Tableau Cloud schedule (hourly / daily / weekly / monthly)
+    for you.</li>
+</ul>
+
+<h2>Architecture</h2>
+<pre><code>Browser (index.html + Alpine.js + Pico.css)
+   │  GET  /api/jobs, /api/subscriptions, /api/extract-tasks
+   │  GET  /api/workbooks, /api/datasources, /api/views, /api/users
+   │  POST /api/subscriptions, /api/extract-tasks
+   ▼
+FastAPI backend  ──uses──▶  tableauserverclient  ──▶  Tableau Cloud REST API</code></pre>
+
+<p>The backend holds your Tableau credentials and talks to Tableau Cloud on your behalf.
+The browser never talks to Tableau directly and never sees your credentials &mdash; it only
+talks to this local backend.</p>
+
+<p>Reads (jobs, subscriptions, extract-refresh tasks, workbooks, datasources, views, users)
+go through the official <code>tableauserverclient</code> library. Creates (new subscriptions
+and extract-refresh tasks) build the exact XML body documented by the
+<a href="https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref.htm">Tableau REST API reference</a>
+for Tableau Cloud's inline schedules, since Cloud has no server-wide schedules to
+reference (unlike Tableau Server).</p>
+
+<h2>Prerequisites</h2>
+<ul>
+  <li><strong>Python 3.10+</strong></li>
+  <li>A <strong>Tableau Cloud Personal Access Token (PAT)</strong>:
+    Tableau Cloud &rarr; account menu (top right) &rarr; <strong>My Account Settings</strong> &rarr;
+    <strong>Personal Access Tokens</strong> &rarr; create one. Copy the <strong>token name</strong>
+    and <strong>secret</strong> &mdash; the secret is shown once.</li>
+  <li>Your <strong>pod URL</strong> &mdash; the host you see in the browser when signed into
+    Tableau Cloud, e.g. <code>https://10ax.online.tableau.com</code>.</li>
+  <li>Your <strong>site content URL</strong> &mdash; the segment after <code>/site/</code> in the
+    address bar when viewing your site (not the display name shown in the UI).</li>
+  <li>The PAT owner needs the <strong>Creator</strong> or <strong>Explorer</strong> site role
+    (or Site Administrator) to create subscriptions and extract-refresh tasks.</li>
+</ul>
+
+<h2>Setup</h2>
+<pre><code>python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# then edit .env and fill in your PAT name/secret, pod URL, and site content URL</code></pre>
+
+<p><code>.env</code> is listed in <code>.gitignore</code> and must never be committed.</p>
+
+<h2>Verify your credentials</h2>
+<p>Before starting the web app, confirm your <code>.env</code> values are correct:</p>
+<pre><code>python scripts/smoke.py</code></pre>
+<p>This signs in and prints the current jobs on your site. If it fails, check your PAT,
+pod URL, and site content URL (this is the most common mistake &mdash; it must be the
+content URL, not the site's display name).</p>
+
+<h2>Run</h2>
+<pre><code>uvicorn app:app --reload</code></pre>
+<p>Open <strong>http://localhost:8000</strong>.</p>
+
+<h2>Using the app</h2>
+<ul>
+  <li><strong>Jobs</strong> tab &mdash; the live queue. Refreshes automatically every 7 seconds,
+    or click <em>Refresh now</em>.</li>
+  <li><strong>Scheduled tasks</strong> tab &mdash; existing subscriptions and extract-refresh
+    tasks and their frequency.</li>
+  <li><strong>Add task</strong> tab:
+    <ol>
+      <li>Choose <strong>Subscription</strong> or <strong>Extract refresh</strong>.</li>
+      <li>Pick the target by name (workbook, view, or data source) and, for subscriptions,
+        the user to send to.</li>
+      <li>Build the schedule: pick a frequency and the form shows exactly the fields
+        Tableau Cloud needs for that frequency (e.g. Weekly needs a single day; Monthly
+        needs either a day-of-month or an occurrence like "third Thursday").</li>
+      <li>Click <strong>Create task</strong>. On success it appears in <strong>Scheduled
+        tasks</strong> &mdash; and in Tableau Cloud itself.</li>
+    </ol>
+  </li>
+</ul>
+
+<h2>Project structure</h2>
+<pre><code>tableau-manage-jobs/
+├── app.py               FastAPI app: JSON routes + serves the frontend
+├── tableau.py            Tableau Cloud session, list/create helpers
+├── schedules.py          Builds and validates the Tableau schedule XML
+├── requirements.txt
+├── .env.example          Documents the required environment variables
+├── static/
+│   └── index.html         The whole frontend (Alpine.js + Pico.css via CDN)
+├── scripts/
+│   └── smoke.py           Sign-in sanity check
+├── README.md
+└── README.html</code></pre>
+
+<h2>Security notes</h2>
+<ul>
+  <li>Your PAT lives only in <code>.env</code> on your machine and is used only by the
+    backend process &mdash; it is never sent to or visible in the browser.</li>
+  <li>This app has <strong>no login of its own</strong> and is meant to run on
+    <code>localhost</code> for a single user. Do not deploy it to a shared or public server
+    without adding authentication in front of it.</li>
+  <li>Never commit <code>.env</code>. <code>.env.example</code> documents the variable names
+    with no real values, and is safe to commit.</li>
+</ul>
+
+<h2>Known limitations</h2>
+<ul>
+  <li>Covers subscriptions and extract-refresh tasks. Flow-run tasks are not yet included.</li>
+  <li>No run-now, edit, or delete actions from the UI yet (the read/create paths are built
+    so these are straightforward to add later).</li>
+  <li>Single-user, local use only &mdash; there is no multi-user auth model.</li>
+</ul>
+
+<h2>Built with</h2>
+<ul>
+  <li><a href="https://fastapi.tiangolo.com/">FastAPI</a> + <a href="https://www.uvicorn.org/">Uvicorn</a></li>
+  <li><a href="https://tableau.github.io/server-client-python/">tableauserverclient</a>
+    (the official Tableau REST API client for Python)</li>
+  <li><a href="https://alpinejs.dev/">Alpine.js</a> and <a href="https://picocss.com/">Pico.css</a>
+    (via CDN, no build step)</li>
+</ul>
+
+</body>
+</html>
