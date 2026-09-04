@@ -35,6 +35,8 @@
         <li><a href="#" @click.prevent="view = 'jobs'" :aria-current="view === 'jobs'">Jobs</a></li>
         <li><a href="#" @click.prevent="view = 'tasks'" :aria-current="view === 'tasks'">Scheduled tasks</a></li>
         <li><a href="#" @click.prevent="view = 'add'" :aria-current="view === 'add'">Add task</a></li>
+        <li><a href="#" @click.prevent="view = 'multi'" :aria-current="view === 'multi'">Add multiple tasks</a></li>
+        <li><a href="#" @click.prevent="view = 'chains'" :aria-current="view === 'chains'">Chains</a></li>
       </ul>
     </nav>
 
@@ -44,21 +46,63 @@
         <h3>Live job queue</h3>
         <button class="outline" @click="fetchJobs()">Refresh now</button>
       </header>
-      <p class="muted">Auto-refreshes every 7 seconds.</p>
+      <p class="muted">Live job queue auto-refreshes every 7 seconds.</p>
+
+      <div style="display:flex; gap:0.75rem; align-items:center; margin-bottom:0.75rem;">
+        <button class="outline" @click="refreshDetail('unknown')" :disabled="detailStatus.status === 'running'">Update jobs with unknown detail</button>
+        <button class="outline" @click="refreshDetail('all')" :disabled="detailStatus.status === 'running'">Update all job details</button>
+        <span class="muted" x-show="detailStatus.status === 'running'">
+          Refreshing detail (<span x-text="detailStatus.scope"></span>): <span x-text="detailStatus.done"></span>/<span x-text="detailStatus.total"></span>
+          <template x-if="detailStatus.failed"> &mdash; <span x-text="detailStatus.failed"></span> failed</template>
+        </span>
+        <span class="muted" x-show="detailStatus.status === 'done' && !detailPolling">Detail refresh complete (<span x-text="formatTimestamp(detailStatus.finished_at)"></span>).</span>
+        <span x-show="detailStatus.status === 'error'"><mark x-text="'Detail refresh failed: ' + detailStatus.error"></mark></span>
+      </div>
+
+      <div style="display:flex; gap:0.75rem; align-items:center; margin-bottom:0.75rem; flex-wrap:wrap;">
+        <label style="margin-bottom:0;">Status <span class="muted">(ctrl/cmd-click for multiple)</span>
+          <select x-model="jobFilters.statuses" multiple size="4">
+            <template x-for="s in jobStatusOptions" :key="s">
+              <option :value="s" x-text="s"></option>
+            </template>
+          </select>
+        </label>
+        <label style="margin-bottom:0;">Type
+          <select x-model="jobFilters.type">
+            <option value="">All</option>
+            <template x-for="t in jobTypeOptions" :key="t">
+              <option :value="t" x-text="t"></option>
+            </template>
+          </select>
+        </label>
+        <label style="margin-bottom:0; flex:1; min-width:200px;">Search
+          <input type="search" x-model="jobFilters.search" placeholder="Title, target, reason&hellip;" />
+        </label>
+        <button class="outline" style="margin-bottom:0;" @click="clearJobFilters()" :disabled="!jobFiltersActive">Clear filters</button>
+      </div>
+      <p class="muted" x-show="jobFiltersActive">Showing <span x-text="filteredJobs.length"></span> of <span x-text="jobs.length"></span> jobs.</p>
+
       <table class="compact striped">
-        <thead><tr><th>Status</th><th>Type</th><th>Title</th><th>Created</th><th>Started</th><th>Ended</th></tr></thead>
+        <thead><tr><th>Status</th><th>Type</th><th>ID</th><th>Title</th><th>Target</th><th>Reason</th><th>Finish</th><th>Mode</th><th>Progress</th><th>Created</th><th>Started</th><th>Ended</th></tr></thead>
         <tbody>
-          <template x-for="job in jobs" :key="job.id">
+          <template x-for="job in filteredJobs" :key="job.id">
             <tr>
               <td><span class="tag" :class="statusTag(job.status)" x-text="job.status || '—'"></span></td>
               <td x-text="job.type || '—'"></td>
+              <td x-text="job.id"></td>
               <td x-text="job.title || job.subtitle || '—'"></td>
+              <td x-text="job.detail?.target_name || '—'"></td>
+              <td x-text="(job.detail?.notes || []).join('; ') || '—'"></td>
+              <td x-text="finishLabel(job.detail?.finish_code)"></td>
+              <td x-text="job.detail?.mode || '—'"></td>
+              <td x-text="job.detail?.progress || '—'"></td>
               <td x-text="job.created_at || '—'"></td>
               <td x-text="job.started_at || '—'"></td>
               <td x-text="job.ended_at || '—'"></td>
             </tr>
           </template>
-          <tr x-show="jobs.length === 0"><td colspan="6" class="muted">No jobs found.</td></tr>
+          <tr x-show="jobs.length === 0"><td colspan="12" class="muted">No jobs found.</td></tr>
+          <tr x-show="jobs.length > 0 && filteredJobs.length === 0"><td colspan="12" class="muted">No jobs match the current filters.</td></tr>
         </tbody>
       </table>
     </section>
@@ -72,7 +116,10 @@
           <template x-for="s in subscriptions" :key="s.id">
             <tr>
               <td x-text="s.subject || '—'"></td>
-              <td x-text="(s.target_type || '?') + ' / ' + (s.target_id || '?')"></td>
+              <td>
+                <a x-show="targetUrl(s.target_type, s.target_id)" :href="targetUrl(s.target_type, s.target_id)" target="_blank" rel="noopener" x-text="targetLabel(s.target_type, s.target_id)"></a>
+                <span x-show="!targetUrl(s.target_type, s.target_id)" x-text="targetLabel(s.target_type, s.target_id)"></span>
+              </td>
               <td x-text="s.schedule_frequency || '—'"></td>
               <td x-text="s.suspended ? 'yes' : 'no'"></td>
             </tr>
@@ -87,7 +134,10 @@
         <tbody>
           <template x-for="t in extractTasks" :key="t.id">
             <tr>
-              <td x-text="(t.target_type || '?') + ' / ' + (t.target_id || '?')"></td>
+              <td>
+                <a x-show="targetUrl(t.target_type, t.target_id)" :href="targetUrl(t.target_type, t.target_id)" target="_blank" rel="noopener" x-text="targetLabel(t.target_type, t.target_id)"></a>
+                <span x-show="!targetUrl(t.target_type, t.target_id)" x-text="targetLabel(t.target_type, t.target_id)"></span>
+              </td>
               <td x-text="t.schedule_frequency || '—'"></td>
               <td x-text="t.last_run_at || 'never'"></td>
               <td x-text="t.consecutive_failed_count ?? '—'"></td>
@@ -282,6 +332,268 @@
         <span x-show="submitting" aria-busy="true">Creating&hellip;</span>
       </button>
     </section>
+
+    <!-- ADD MULTIPLE TASKS -->
+    <section x-show="view === 'multi'">
+      <h3>Add multiple tasks</h3>
+      <p class="muted">Select several items to create on the same schedule.</p>
+
+      <fieldset>
+        <legend>Task type</legend>
+        <label><input type="radio" value="subscription" x-model="multi.taskType" /> Subscription (email a view/workbook)</label>
+        <label><input type="radio" value="extract" x-model="multi.taskType" /> Extract refresh</label>
+      </fieldset>
+
+      <!-- SUBSCRIPTION FIELDS -->
+      <template x-if="multi.taskType === 'subscription'">
+        <div>
+          <label>Subject
+            <input type="text" x-model="multi.sub.subject" placeholder="e.g. Weekly sales report" />
+          </label>
+          <div class="grid">
+            <label>Content type
+              <select x-model="multi.sub.contentType" @change="multi.sub.contentIds = []">
+                <option value="Workbook">Workbook</option>
+                <option value="View">View</option>
+              </select>
+            </label>
+            <label>Send to user
+              <select x-model="multi.sub.userId">
+                <option value="" disabled selected>Choose one&hellip;</option>
+                <template x-for="u in users" :key="u.id">
+                  <option :value="u.id" x-text="u.name"></option>
+                </template>
+              </select>
+            </label>
+          </div>
+          <fieldset style="max-height:220px; overflow-y:auto;">
+            <legend>Content (select one or more)</legend>
+            <template x-for="item in multiContentOptions" :key="item.id">
+              <label style="display:block;">
+                <input type="checkbox" :value="item.id" x-model="multi.sub.contentIds" /> <span x-text="item.name"></span>
+              </label>
+            </template>
+            <p class="muted" x-show="multiContentOptions.length === 0">No items found.</p>
+          </fieldset>
+        </div>
+      </template>
+
+      <!-- EXTRACT REFRESH FIELDS -->
+      <template x-if="multi.taskType === 'extract'">
+        <div>
+          <div class="grid">
+            <label>Refresh type
+              <select x-model="multi.extract.refreshType">
+                <option value="FullRefresh">Full refresh</option>
+                <option value="IncrementalExtract">Incremental</option>
+              </select>
+            </label>
+            <label>Target type
+              <select x-model="multi.extract.targetType" @change="multi.extract.targetIds = []">
+                <option value="workbook">Workbook</option>
+                <option value="datasource">Data source</option>
+              </select>
+            </label>
+          </div>
+          <fieldset style="max-height:220px; overflow-y:auto;">
+            <legend>Targets (select one or more)</legend>
+            <template x-for="item in multiTargetOptions" :key="item.id">
+              <label style="display:block;">
+                <input type="checkbox" :value="item.id" x-model="multi.extract.targetIds" /> <span x-text="item.name"></span>
+              </label>
+            </template>
+            <p class="muted" x-show="multiTargetOptions.length === 0">No items found.</p>
+          </fieldset>
+        </div>
+      </template>
+
+      <hr />
+      <h4>Schedule</h4>
+      <label>Frequency
+        <select x-model="multi.schedule.frequency">
+          <option value="Hourly">Hourly</option>
+          <option value="Daily">Daily</option>
+          <option value="Weekly">Weekly</option>
+          <option value="Monthly">Monthly</option>
+        </select>
+      </label>
+
+      <!-- HOURLY -->
+      <template x-if="multi.schedule.frequency === 'Hourly'">
+        <div>
+          <p class="muted">Runs once every hour, between a start and end time.</p>
+          <div class="grid">
+            <label>Start <input type="time" step="300" x-model="multi.schedule.start" /></label>
+            <label>End <input type="time" step="300" x-model="multi.schedule.end" /></label>
+          </div>
+          <fieldset>
+            <legend class="muted">Restrict to specific days (optional)</legend>
+            <template x-for="day in weekdayOptions" :key="day">
+              <label style="display:inline-block; margin-right:1rem;">
+                <input type="checkbox" :value="day" x-model="multi.schedule.weekDays" /> <span x-text="day"></span>
+              </label>
+            </template>
+          </fieldset>
+        </div>
+      </template>
+
+      <!-- DAILY -->
+      <template x-if="multi.schedule.frequency === 'Daily'">
+        <div>
+          <div class="grid">
+            <label>Every
+              <select x-model.number="multi.schedule.hours">
+                <template x-for="h in dailyHourOptions" :key="h">
+                  <option :value="h" x-text="h + ' hour(s)'"></option>
+                </template>
+              </select>
+            </label>
+            <label>Start <input type="time" step="300" x-model="multi.schedule.start" /></label>
+            <label x-show="multi.schedule.hours != 24">End <input type="time" step="300" x-model="multi.schedule.end" /></label>
+          </div>
+          <fieldset>
+            <legend class="muted">Restrict to specific days (optional)</legend>
+            <template x-for="day in weekdayOptions" :key="day">
+              <label style="display:inline-block; margin-right:1rem;">
+                <input type="checkbox" :value="day" x-model="multi.schedule.weekDays" /> <span x-text="day"></span>
+              </label>
+            </template>
+          </fieldset>
+        </div>
+      </template>
+
+      <!-- WEEKLY -->
+      <template x-if="multi.schedule.frequency === 'Weekly'">
+        <label>Day of week
+          <select x-model="multi.schedule.weekDay">
+            <option value="" disabled selected>Choose one&hellip;</option>
+            <template x-for="day in weekdayOptions" :key="day">
+              <option :value="day" x-text="day"></option>
+            </template>
+          </select>
+        </label>
+      </template>
+
+      <!-- MONTHLY -->
+      <template x-if="multi.schedule.frequency === 'Monthly'">
+        <div>
+          <fieldset>
+            <label><input type="radio" value="day" x-model="multi.schedule.monthDayMode" /> On a specific day of the month</label>
+            <label><input type="radio" value="occurrence" x-model="multi.schedule.monthDayMode" /> On an occurrence (e.g. third Thursday)</label>
+          </fieldset>
+          <template x-if="multi.schedule.monthDayMode === 'day'">
+            <label>Day of month
+              <select x-model="multi.schedule.monthDay">
+                <option value="LastDay">Last day of month</option>
+                <template x-for="d in 31" :key="d">
+                  <option :value="String(d)" x-text="d"></option>
+                </template>
+              </select>
+            </label>
+          </template>
+          <template x-if="multi.schedule.monthDayMode === 'occurrence'">
+            <div class="grid">
+              <label>Occurrence
+                <select x-model="multi.schedule.monthOccurrence">
+                  <option value="First">First</option>
+                  <option value="Second">Second</option>
+                  <option value="Third">Third</option>
+                  <option value="Fourth">Fourth</option>
+                  <option value="Last">Last</option>
+                </select>
+              </label>
+              <label>Day of week
+                <select x-model="multi.schedule.weekDay">
+                  <option value="" disabled selected>Choose one&hellip;</option>
+                  <template x-for="day in weekdayOptions" :key="day">
+                    <option :value="day" x-text="day"></option>
+                  </template>
+                </select>
+              </label>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <button :disabled="submitting || multiSelectedCount === 0" @click="multi.taskType === 'subscription' ? submitMultiSubscriptions() : submitMultiExtractTasks()">
+        <span x-show="!submitting">Create <span x-text="multiSelectedCount"></span> task(s)</span>
+        <span x-show="submitting" aria-busy="true">Creating&hellip;</span>
+      </button>
+    </section>
+
+    <!-- CHAINS -->
+    <section x-show="view === 'chains'">
+      <h3>Run tasks in sequence</h3>
+      <p class="muted">
+        Runs the selected extract refresh tasks one after another, waiting for each to
+        finish successfully before starting the next. This only chains runs started here
+        &mdash; it does not intercept a task's own Tableau-set schedule. (For that, Task A's
+        schedule needs a webhook watching for its completion, which is a separate piece of
+        infrastructure outside this app.)
+      </p>
+
+      <label>Add a task to the chain
+        <select @change="addToChain($event.target.value); $event.target.value = ''">
+          <option value="" disabled selected>Choose one&hellip;</option>
+          <template x-for="t in extractTasks" :key="t.id">
+            <option :value="t.id" x-text="extractTaskLabel(t.id) + ' (' + (t.target_type || '?') + ')'"></option>
+          </template>
+        </select>
+      </label>
+
+      <ol>
+        <template x-for="(taskId, index) in chainSelected" :key="index + '-' + taskId">
+          <li style="margin-bottom:0.4rem;">
+            <span x-text="extractTaskLabel(taskId)"></span>
+            <button class="outline" style="padding:0.1rem 0.5rem;" @click="moveChainStep(index, -1)" :disabled="index === 0">&uarr;</button>
+            <button class="outline" style="padding:0.1rem 0.5rem;" @click="moveChainStep(index, 1)" :disabled="index === chainSelected.length - 1">&darr;</button>
+            <button class="outline" style="padding:0.1rem 0.5rem;" @click="removeFromChain(index)">Remove</button>
+          </li>
+        </template>
+      </ol>
+
+      <button @click="runChain()" :disabled="chainSelected.length < 2 || chainRunning">
+        <span x-show="!chainRunning">Run chain</span>
+        <span x-show="chainRunning" aria-busy="true">Running&hellip;</span>
+      </button>
+      <p class="muted" x-show="chainSelected.length > 0 && chainSelected.length < 2">Add at least two tasks to chain.</p>
+
+      <template x-if="chainCurrentRun">
+        <div>
+          <h4>Current run</h4>
+          <table class="compact striped">
+            <thead><tr><th>Step</th><th>Task</th><th>Status</th><th>Job id</th><th>Error</th></tr></thead>
+            <tbody>
+              <template x-for="(step, i) in chainCurrentRun.steps" :key="i">
+                <tr>
+                  <td x-text="i + 1"></td>
+                  <td x-text="extractTaskLabel(step.task_id)"></td>
+                  <td><span class="tag" :class="chainStatusTag(step.status)" x-text="step.status"></span></td>
+                  <td x-text="step.job_id || '—'"></td>
+                  <td x-text="step.error || '—'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <p><strong>Overall:</strong> <span class="tag" :class="chainStatusTag(chainCurrentRun.status)" x-text="chainCurrentRun.status"></span></p>
+        </div>
+      </template>
+
+      <h4>History</h4>
+      <table class="compact striped">
+        <thead><tr><th>Started</th><th>Steps</th><th>Status</th></tr></thead>
+        <tbody>
+          <template x-for="run in chainHistory" :key="run.id">
+            <tr>
+              <td x-text="run.created_at"></td>
+              <td x-text="run.steps.length"></td>
+              <td><span class="tag" :class="chainStatusTag(run.status)" x-text="run.status"></span></td>
+            </tr>
+          </template>
+          <tr x-show="chainHistory.length === 0"><td colspan="3" class="muted">No chain runs yet.</td></tr>
+        </tbody>
+      </table>
+    </section>
   </main>
 
   <script>
@@ -299,12 +611,32 @@
           weekDays: [], weekDay: '',
           monthDayMode: 'day', monthDay: '1', monthOccurrence: 'Third',
         },
+        multi: {
+          taskType: 'subscription',
+          sub: { subject: '', contentType: 'Workbook', contentIds: [], userId: '' },
+          extract: { refreshType: 'FullRefresh', targetType: 'workbook', targetIds: [] },
+          schedule: {
+            frequency: 'Daily',
+            start: '09:00', end: '17:00', hours: 4,
+            weekDays: [], weekDay: '',
+            monthDayMode: 'day', monthDay: '1', monthOccurrence: 'Third',
+          },
+        },
         weekdayOptions: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
         dailyHourOptions: [2, 4, 6, 8, 12, 24],
         error: '', notice: '', submitting: false,
 
+        chainSelected: [], chainCurrentRun: null, chainHistory: [], chainRunning: false, chainPollHandle: null,
+
+        detailStatus: { scope: null, status: 'idle', total: 0, done: 0, failed: 0, error: null },
+        detailPolling: false, detailPollHandle: null,
+
+        jobFilters: { statuses: [], type: '', search: '' },
+
         async init() {
           await this.refreshAll();
+          await this.fetchDetailStatus();
+          if (this.detailStatus.status === 'running') this.watchDetailRefresh();
           setInterval(() => this.fetchJobs(), 7000);
         },
 
@@ -312,6 +644,7 @@
           await Promise.all([
             this.fetchJobs(), this.fetchSubscriptions(), this.fetchExtractTasks(),
             this.fetchWorkbooks(), this.fetchDatasources(), this.fetchViews(), this.fetchUsers(),
+            this.fetchChainHistory(),
           ]);
         },
 
@@ -328,9 +661,66 @@
         async fetchDatasources() { try { this.datasources = await this.fetchJson('/api/datasources'); } catch (e) { this.error = e.message; } },
         async fetchViews() { try { this.views = await this.fetchJson('/api/views'); } catch (e) { this.error = e.message; } },
         async fetchUsers() { try { this.users = await this.fetchJson('/api/users'); } catch (e) { this.error = e.message; } },
+        async fetchChainHistory() { try { this.chainHistory = await this.fetchJson('/api/chains'); } catch (e) { this.error = e.message; } },
+        async fetchDetailStatus() { try { this.detailStatus = await this.fetchJson('/api/jobs/detail/status'); } catch (e) { this.error = e.message; } },
 
         get contentOptions() { return this.sub.contentType === 'Workbook' ? this.workbooks : this.views; },
         get targetOptions() { return this.extract.targetType === 'workbook' ? this.workbooks : this.datasources; },
+        get multiContentOptions() { return this.multi.sub.contentType === 'Workbook' ? this.workbooks : this.views; },
+        get multiTargetOptions() { return this.multi.extract.targetType === 'workbook' ? this.workbooks : this.datasources; },
+        get multiSelectedCount() {
+          return this.multi.taskType === 'subscription' ? this.multi.sub.contentIds.length : this.multi.extract.targetIds.length;
+        },
+
+        get jobStatusOptions() {
+          return [...new Set(this.jobs.map((j) => j.status).filter(Boolean))].sort();
+        },
+        get jobTypeOptions() {
+          return [...new Set(this.jobs.map((j) => j.type).filter(Boolean))].sort();
+        },
+        get jobFiltersActive() {
+          return !!(this.jobFilters.statuses.length || this.jobFilters.type || this.jobFilters.search);
+        },
+        get filteredJobs() {
+          const { statuses, type, search } = this.jobFilters;
+          const q = search.trim().toLowerCase();
+          return this.jobs.filter((j) => {
+            if (statuses.length && !statuses.includes(j.status)) return false;
+            if (type && j.type !== type) return false;
+            if (q) {
+              const haystack = [
+                j.title, j.subtitle, j.detail?.target_name,
+                ...(j.detail?.notes || []),
+              ].filter(Boolean).join(' ').toLowerCase();
+              if (!haystack.includes(q)) return false;
+            }
+            return true;
+          });
+        },
+        clearJobFilters() {
+          this.jobFilters = { statuses: [], type: '', search: '' };
+        },
+
+        // Resolves a scheduled task's target (workbook/view/datasource) to its
+        // name and Tableau Cloud URL, for the Scheduled tasks tables. Subscription
+        // targets use "Workbook"/"View" (capitalized); extract-task targets use
+        // "workbook"/"datasource" (lowercase) - matching what Tableau itself returns.
+        targetList(targetType) {
+          const t = (targetType || '').toLowerCase();
+          if (t === 'workbook') return this.workbooks;
+          if (t === 'view') return this.views;
+          if (t === 'datasource') return this.datasources;
+          return [];
+        },
+        targetRecord(targetType, targetId) {
+          return this.targetList(targetType).find((item) => item.id === targetId);
+        },
+        targetLabel(targetType, targetId) {
+          return this.targetRecord(targetType, targetId)?.name || `${targetType || '?'} / ${targetId || '?'}`;
+        },
+        targetUrl(targetType, targetId) {
+          return this.targetRecord(targetType, targetId)?.url || null;
+        },
 
         statusTag(status) {
           if (status === 'Success') return 'tag-success';
@@ -338,8 +728,43 @@
           return 'tag-pending';
         },
 
-        buildSchedulePayload() {
-          const s = this.schedule;
+        finishLabel(code) {
+          const labels = { 0: 'Success', 1: 'Failed', 2: 'Cancelled', 3: 'Completed' };
+          return code === null || code === undefined ? '—' : (labels[code] ?? String(code));
+        },
+
+        formatTimestamp(iso) {
+          if (!iso) return '—';
+          const d = new Date(iso);
+          return isNaN(d) ? iso : d.toLocaleString();
+        },
+
+        async refreshDetail(scope) {
+          this.error = ''; this.notice = '';
+          try {
+            this.detailStatus = await this.postJson('/api/jobs/detail/refresh', { scope });
+            this.watchDetailRefresh();
+          } catch (e) {
+            this.error = e.message;
+          }
+        },
+
+        watchDetailRefresh() {
+          clearInterval(this.detailPollHandle);
+          this.detailPolling = true;
+          const poll = async () => {
+            await this.fetchDetailStatus();
+            if (this.detailStatus.status !== 'running') {
+              clearInterval(this.detailPollHandle);
+              this.detailPolling = false;
+              await this.fetchJobs();
+            }
+          };
+          this.detailPollHandle = setInterval(poll, 2000);
+          poll();
+        },
+
+        buildSchedulePayload(s = this.schedule) {
           const toHms = (t) => (t ? `${t}:00` : null);
           const payload = { frequency: s.frequency };
           if (s.frequency === 'Hourly') {
@@ -411,6 +836,121 @@
           } finally {
             this.submitting = false;
           }
+        },
+
+        async submitMultiSubscriptions() {
+          this.error = ''; this.notice = ''; this.submitting = true;
+          const ids = this.multi.sub.contentIds;
+          const schedulePayload = this.buildSchedulePayload(this.multi.schedule);
+          let ok = 0;
+          const failures = [];
+          for (const contentId of ids) {
+            try {
+              await this.postJson('/api/subscriptions', {
+                subject: this.multi.sub.subject,
+                content_type: this.multi.sub.contentType,
+                content_id: contentId,
+                user_id: this.multi.sub.userId,
+                schedule: schedulePayload,
+              });
+              ok++;
+            } catch (e) {
+              failures.push(`${this.targetLabel(this.multi.sub.contentType, contentId)}: ${e.message}`);
+            }
+          }
+          this.submitting = false;
+          await this.fetchSubscriptions();
+          this.notice = `Created ${ok} of ${ids.length} subscription(s).`;
+          if (failures.length) this.error = failures.join('; ');
+        },
+
+        async submitMultiExtractTasks() {
+          this.error = ''; this.notice = ''; this.submitting = true;
+          const ids = this.multi.extract.targetIds;
+          const schedulePayload = this.buildSchedulePayload(this.multi.schedule);
+          let ok = 0;
+          const failures = [];
+          for (const targetId of ids) {
+            try {
+              await this.postJson('/api/extract-tasks', {
+                refresh_type: this.multi.extract.refreshType,
+                target_type: this.multi.extract.targetType,
+                target_id: targetId,
+                schedule: schedulePayload,
+              });
+              ok++;
+            } catch (e) {
+              failures.push(`${this.targetLabel(this.multi.extract.targetType, targetId)}: ${e.message}`);
+            }
+          }
+          this.submitting = false;
+          await this.fetchExtractTasks();
+          this.notice = `Created ${ok} of ${ids.length} extract refresh task(s).`;
+          if (failures.length) this.error = failures.join('; ');
+        },
+
+        extractTaskLabel(taskId) {
+          const task = this.extractTasks.find((t) => t.id === taskId);
+          if (!task) return taskId;
+          const list = task.target_type === 'workbook' ? this.workbooks : this.datasources;
+          const match = list.find((i) => i.id === task.target_id);
+          return match ? match.name : task.target_id;
+        },
+
+        chainStatusTag(status) {
+          if (status === 'success') return 'tag-success';
+          if (status === 'failed') return 'tag-fail';
+          return 'tag-pending';
+        },
+
+        addToChain(taskId) {
+          if (taskId) this.chainSelected.push(taskId);
+        },
+        removeFromChain(index) {
+          this.chainSelected.splice(index, 1);
+        },
+        moveChainStep(index, delta) {
+          const newIndex = index + delta;
+          if (newIndex < 0 || newIndex >= this.chainSelected.length) return;
+          const [item] = this.chainSelected.splice(index, 1);
+          this.chainSelected.splice(newIndex, 0, item);
+        },
+
+        async runChain() {
+          this.error = ''; this.notice = '';
+          if (this.chainSelected.length < 2) {
+            this.error = 'Add at least two tasks to chain.';
+            return;
+          }
+          this.chainRunning = true;
+          try {
+            const data = await this.postJson('/api/chains', { task_ids: this.chainSelected });
+            this.notice = `Chain started (id ${data.id}).`;
+            await this.watchChain(data.id);
+          } catch (e) {
+            this.error = e.message;
+            this.chainRunning = false;
+          }
+        },
+
+        async watchChain(runId) {
+          clearInterval(this.chainPollHandle);
+          const poll = async () => {
+            try {
+              this.chainCurrentRun = await this.fetchJson(`/api/chains/${runId}`);
+              if (this.chainCurrentRun.status !== 'running') {
+                clearInterval(this.chainPollHandle);
+                this.chainRunning = false;
+                await this.fetchChainHistory();
+              }
+            } catch (e) {
+              this.error = e.message;
+              this.chainRunning = false;
+              clearInterval(this.chainPollHandle);
+            }
+          };
+          await poll();
+          this.chainPollHandle = setInterval(poll, 3000);
         },
       };
     }

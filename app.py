@@ -9,10 +9,13 @@ from pathlib import Path
 
 import tableauserverclient as TSC
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import chains
+import jobdetail
+import jobstore
 import schedules
 import tableau
 
@@ -51,6 +54,14 @@ class ExtractTaskCreate(BaseModel):
     schedule: ScheduleInput
 
 
+class ChainCreate(BaseModel):
+    task_ids: list[str]
+
+
+class DetailRefreshCreate(BaseModel):
+    scope: str  # "all" or "unknown"
+
+
 def _run(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
@@ -67,7 +78,10 @@ def _run(fn, *args, **kwargs):
 
 @app.get("/api/jobs")
 def get_jobs():
-    return _run(tableau.list_jobs, _session)
+    jobs = _run(tableau.list_jobs, _session)
+    for job in jobs:
+        job["detail"] = jobstore.get(job["id"])
+    return jobs
 
 
 @app.get("/api/subscriptions")
@@ -130,6 +144,50 @@ def add_extract_task(body: ExtractTaskCreate):
         schedule_xml=schedule_xml,
     )
     return {"id": new_id}
+
+
+# -- Chains -----------------------------------------------------------------
+
+
+@app.post("/api/chains")
+def add_chain(body: ChainCreate, background_tasks: BackgroundTasks):
+    try:
+        run = chains.start_chain(body.task_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    background_tasks.add_task(chains.execute, _session, run)
+    return {"id": run.id}
+
+
+@app.get("/api/chains/{run_id}")
+def get_chain(run_id: str):
+    run = chains.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="No chain run with that id")
+    return chains.run_to_dict(run)
+
+
+@app.get("/api/chains")
+def get_chains():
+    return [chains.run_to_dict(r) for r in chains.list_runs()]
+
+
+# -- Job detail admin --------------------------------------------------------
+
+
+@app.post("/api/jobs/detail/refresh")
+def refresh_job_detail(body: DetailRefreshCreate, background_tasks: BackgroundTasks):
+    if body.scope not in ("all", "unknown"):
+        raise HTTPException(status_code=400, detail="scope must be 'all' or 'unknown'")
+    if not jobdetail.start_refresh(body.scope):
+        raise HTTPException(status_code=409, detail="A job-detail refresh is already running")
+    background_tasks.add_task(jobdetail.execute, _session, body.scope)
+    return jobdetail.get_status()
+
+
+@app.get("/api/jobs/detail/status")
+def get_job_detail_status():
+    return jobdetail.get_status()
 
 
 app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="static")

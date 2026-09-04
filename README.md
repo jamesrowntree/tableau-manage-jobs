@@ -16,6 +16,14 @@ tasks — without clicking through the Tableau Cloud UI.
 - **Add task** — creates a new subscription or extract-refresh task, with a
   form that builds the correct Tableau Cloud schedule (hourly / daily /
   weekly / monthly) for you.
+- **Add multiple tasks** — the same form as **Add task**, but with a
+  multi-select instead of a single-select for the target: check off several
+  workbooks, views, or data sources and create one task per item, all on the
+  same schedule.
+- **Chains** — runs a chosen sequence of extract-refresh tasks one after
+  another, waiting for each to finish successfully before starting the next.
+  Useful when one refresh genuinely needs to finish before the next one makes
+  sense, since Tableau Cloud has no native way to express that (see below).
 
 ## How scheduling works
 
@@ -31,6 +39,11 @@ shared schedule object to point them at instead. This matches how Tableau
 Cloud itself works (you'll see the same thing in the Tableau Cloud UI:
 schedules only ever appear nested under one task, never as a shared, standalone
 list).
+
+**Add multiple tasks** works the same way under the hood — it's a
+convenience for building several tasks at once, not a shared schedule.
+Selecting five items still creates five separate tasks on Tableau Cloud,
+each with its own copy of the schedule you set once in the form.
 
 ## Architecture
 
@@ -117,6 +130,25 @@ Open **http://localhost:8000**.
      "third Thursday").
   4. Click **Create task**. On success it appears in **Scheduled tasks** —
      and in Tableau Cloud itself.
+- **Add multiple tasks** tab:
+  1. Choose **Subscription** or **Extract refresh**, same as **Add task**.
+  2. Check off as many workbooks, views, or data sources as you want (and,
+     for subscriptions, the one user to send them all to).
+  3. Build the schedule once — same fields as **Add task**.
+  4. Click **Create N task(s)**. Each checked item becomes its own task with
+     its own copy of that schedule; a summary reports how many succeeded and
+     lists any that failed, without losing the others.
+- **Chains** tab:
+  1. Add two or more existing extract-refresh tasks to the chain, in the
+     order they should run (reorder or remove them as needed).
+  2. Click **Run chain**. Each task is started with Tableau's "run now",
+     and the app waits for that job to finish before starting the next.
+  3. The current run's per-step status updates live; a run stops at the
+     first failed step rather than continuing (fail-closed). Past runs are
+     kept in the history list below.
+  4. **Note:** this only chains runs you start from this tab. It does not
+     intercept a task's own Tableau-set schedule — if Task A's regular
+     6am refresh runs on its own, this app won't notice or chain off it.
 
 ## Project structure
 
@@ -125,6 +157,7 @@ tableau-manage-jobs/
 ├── app.py               FastAPI app: JSON routes + serves the frontend
 ├── tableau.py            Tableau Cloud session, list/create helpers
 ├── schedules.py          Builds and validates the Tableau schedule XML
+├── chains.py             Sequential "run task, wait, run next" chain runner
 ├── requirements.txt
 ├── .env.example          Documents the required environment variables
 ├── static/
@@ -149,8 +182,14 @@ tableau-manage-jobs/
 
 - Covers subscriptions and extract-refresh tasks. Flow-run tasks are not
   yet included.
-- No run-now, edit, or delete actions from the UI yet (the read/create paths
-  are built so these are straightforward to add later).
+- Run-now is only available as part of a chain, not as a standalone "run
+  this one task now" button; edit/delete actions aren't in the UI yet
+  either (the read/create paths are built so these are straightforward to
+  add later).
+- Chains only run while triggered from this app — see the Chains tab note
+  above. Automatically chaining off a task's own natural schedule needs a
+  webhook listener, which is a separate piece of infrastructure outside
+  this app.
 - Single-user, local use only — there is no multi-user auth model.
 
 ## Built with

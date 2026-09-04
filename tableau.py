@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 import tableauserverclient as TSC
@@ -131,6 +132,80 @@ def _get(obj, attr, default=None):
     return getattr(obj, attr, default)
 
 
+_WEEKDAY_NAMES = frozenset(
+    {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"}
+)
+
+
+def _format_hours(n: float) -> str:
+    n = float(n)
+    return f"{int(n)}h" if n == int(n) else f"{n}h"
+
+
+def _split_days(values: tuple) -> tuple[list, list]:
+    """Splits an interval's raw values into (non_day_values, weekday_names).
+
+    Note: TSC represents an hours/minutes value as a plain numeric *string*
+    for Hourly (e.g. "2") but as a *float* for Daily (e.g. 24.0) - so we can't
+    tell the two kinds apart by type alone. Matching against the known
+    weekday names works for both.
+    """
+    days = [v for v in values if str(v) in _WEEKDAY_NAMES]
+    other = [v for v in values if str(v) not in _WEEKDAY_NAMES]
+    return other, days
+
+
+def _day_suffix(days: list) -> str:
+    # All 7 days present just means "every day" - showing the full list adds
+    # noise instead of information.
+    if not days or set(days) == _WEEKDAY_NAMES:
+        return ""
+    return f" ({', '.join(days)})"
+
+
+def _format_interval(interval) -> str | None:
+    """Human-readable summary of a TSC interval object (Hourly/Daily/Weekly/
+    MonthlyInterval), replacing its default repr() - e.g. "<DailyInterval
+    start=09:45:00 interval=(24.0, 'Friday')>" - for display."""
+    if interval is None:
+        return None
+
+    cls = type(interval).__name__
+    start = _get(interval, "start_time")
+    values = tuple(_get(interval, "interval") or ())
+
+    if cls == "HourlyInterval":
+        end = _get(interval, "end_time")
+        hours, days = _split_days(values)
+        every = f"every {_format_hours(hours[0])}" if hours else "hourly"
+        if end and end == start:
+            window = "all day"
+        elif end:
+            window = f"{start}–{end}"
+        else:
+            window = f"from {start}"
+        return f"Hourly, {every}, {window}{_day_suffix(days)}"
+
+    if cls == "DailyInterval":
+        hours, days = _split_days(values)
+        every = f"every {_format_hours(hours[0])}" if hours else "daily"
+        return f"Daily, {every}, starts {start}{_day_suffix(days)}"
+
+    if cls == "WeeklyInterval":
+        days = ", ".join(str(v) for v in values) or "?"
+        return f"Weekly on {days}, {start}"
+
+    if cls == "MonthlyInterval":
+        if len(values) == 2:
+            occurrence, weekday = values
+            return f"Monthly, {occurrence} {weekday}, {start}"
+        day = values[0] if values else "?"
+        label = "last day" if day == "LastDay" else f"day {day}"
+        return f"Monthly on {label}, {start}"
+
+    return str(interval)
+
+
 def job_to_dict(job) -> dict:
     """`server.jobs.get()` (via TSC.Pager) yields `BackgroundJobItem`, which has
     a different attribute set than the `JobItem` returned by `get_by_id`."""
@@ -160,7 +235,7 @@ def subscription_to_dict(sub: TSC.SubscriptionItem) -> dict:
         "target_type": _get(target, "type") if target else None,
         "target_id": _get(target, "id") if target else None,
         "suspended": _get(sub, "suspended"),
-        "schedule_frequency": str(interval) if interval else None,
+        "schedule_frequency": _format_interval(interval),
     }
 
 
@@ -176,13 +251,40 @@ def task_to_dict(task: TSC.TaskItem) -> dict:
         "target_id": _get(target, "id") if target else None,
         "consecutive_failed_count": _get(task, "consecutive_failed_count"),
         "last_run_at": str(_get(task, "last_run_at", "") or ""),
-        "schedule_frequency": str(interval) if interval else None,
+        "schedule_frequency": _format_interval(interval),
     }
 
 
 def list_jobs(session: TableauSession) -> list[dict]:
     def _do(server: TSC.Server):
         return [job_to_dict(j) for j in TSC.Pager(server.jobs)]
+
+    return session.call(_do)
+
+
+def job_detail_to_dict(job: TSC.JobItem) -> dict:
+    """`server.jobs.get_by_id()` returns a `JobItem`, which - unlike the
+    `BackgroundJobItem` from the bulk list - carries the target (datasource
+    or workbook) a job acted on plus its failure notes."""
+    return {
+        "type": _get(job, "type"),
+        "progress": _get(job, "progress"),
+        "finish_code": _get(job, "finish_code"),
+        "notes": list(_get(job, "notes") or []),
+        "mode": _get(job, "mode"),
+        "datasource_id": _get(job, "datasource_id"),
+        "datasource_name": _get(job, "datasource_name"),
+        "workbook_id": _get(job, "workbook_id"),
+        "workbook_name": _get(job, "workbook_name"),
+        "target_name": _get(job, "datasource_name") or _get(job, "workbook_name"),
+        "updated_at": str(_get(job, "updated_at", "") or ""),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def get_job_detail(session: TableauSession, job_id: str) -> dict:
+    def _do(server: TSC.Server):
+        return job_detail_to_dict(server.jobs.get_by_id(job_id))
 
     return session.call(_do)
 
@@ -203,21 +305,33 @@ def list_extract_tasks(session: TableauSession) -> list[dict]:
 
 def list_workbooks(session: TableauSession) -> list[dict]:
     def _do(server: TSC.Server):
-        return [{"id": w.id, "name": w.name} for w in TSC.Pager(server.workbooks)]
+        return [{"id": w.id, "name": w.name, "url": _get(w, "webpage_url")} for w in TSC.Pager(server.workbooks)]
 
     return session.call(_do)
 
 
 def list_datasources(session: TableauSession) -> list[dict]:
     def _do(server: TSC.Server):
-        return [{"id": d.id, "name": d.name} for d in TSC.Pager(server.datasources)]
+        return [{"id": d.id, "name": d.name, "url": _get(d, "webpage_url")} for d in TSC.Pager(server.datasources)]
 
     return session.call(_do)
 
 
 def list_views(session: TableauSession) -> list[dict]:
+    # ViewItem has no webpage_url of its own; build it the same way Tableau's
+    # own UI links to a view, from content_url (e.g. "WorkbookName/SheetName").
+    base = session.config.server_url
+    site_segment = f"site/{session.config.site_content_url}/" if session.config.site_content_url else ""
+
     def _do(server: TSC.Server):
-        return [{"id": v.id, "name": v.name} for v in TSC.Pager(server.views)]
+        return [
+            {
+                "id": v.id,
+                "name": v.name,
+                "url": f"{base}/#/{site_segment}views/{v.content_url}" if _get(v, "content_url") else None,
+            }
+            for v in TSC.Pager(server.views)
+        ]
 
     return session.call(_do)
 
