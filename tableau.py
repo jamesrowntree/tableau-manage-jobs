@@ -206,6 +206,56 @@ def _format_interval(interval) -> str | None:
     return str(interval)
 
 
+def _time_str(value) -> str | None:
+    return value.strftime("%H:%M:%S") if hasattr(value, "strftime") else None
+
+
+def _interval_to_schedule_params(interval) -> dict | None:
+    """Structured counterpart to _format_interval, matching the payload shape
+    schedules.build_schedule_xml expects - lets the frontend prefill a new
+    task's schedule from an existing one's, instead of the human-readable
+    string _format_interval produces.
+
+    Daily intervals with hours != 24 come back from TSC without an end_time
+    (tableauserverclient's DailyInterval model has no such field even though
+    the create API requires one) - `end` is simply omitted in that case and
+    the user fills it in on the form.
+    """
+    if interval is None:
+        return None
+
+    cls = type(interval).__name__
+    start = _get(interval, "start_time")
+    values = tuple(_get(interval, "interval") or ())
+
+    if cls == "HourlyInterval":
+        hours, days = _split_days(values)
+        params = {"frequency": "Hourly", "start": _time_str(start), "end": _time_str(_get(interval, "end_time"))}
+        if days:
+            params["week_days"] = days
+        return params
+
+    if cls == "DailyInterval":
+        hours, days = _split_days(values)
+        params = {"frequency": "Daily", "start": _time_str(start), "hours": int(float(hours[0])) if hours else 24}
+        if days:
+            params["week_days"] = days
+        return params
+
+    if cls == "WeeklyInterval":
+        return {"frequency": "Weekly", "week_day": str(values[0])} if values else None
+
+    if cls == "MonthlyInterval":
+        if len(values) == 2:
+            occurrence, weekday = values
+            return {"frequency": "Monthly", "month_occurrence": occurrence, "week_day": weekday}
+        if values:
+            return {"frequency": "Monthly", "month_day": str(values[0])}
+        return None
+
+    return None
+
+
 def job_to_dict(job) -> dict:
     """`server.jobs.get()` (via TSC.Pager) yields `BackgroundJobItem`, which has
     a different attribute set than the `JobItem` returned by `get_by_id`."""
@@ -236,6 +286,7 @@ def subscription_to_dict(sub: TSC.SubscriptionItem) -> dict:
         "target_id": _get(target, "id") if target else None,
         "suspended": _get(sub, "suspended"),
         "schedule_frequency": _format_interval(interval),
+        "schedule_params": _interval_to_schedule_params(interval),
     }
 
 
@@ -252,6 +303,7 @@ def task_to_dict(task: TSC.TaskItem) -> dict:
         "consecutive_failed_count": _get(task, "consecutive_failed_count"),
         "last_run_at": str(_get(task, "last_run_at", "") or ""),
         "schedule_frequency": _format_interval(interval),
+        "schedule_params": _interval_to_schedule_params(interval),
     }
 
 
@@ -289,6 +341,10 @@ def get_job_detail(session: TableauSession, job_id: str) -> dict:
     return session.call(_do)
 
 
+def cancel_job(session: TableauSession, job_id: str) -> None:
+    session.call(lambda server: server.jobs.cancel(job_id))
+
+
 def list_subscriptions(session: TableauSession) -> list[dict]:
     def _do(server: TSC.Server):
         return [subscription_to_dict(s) for s in TSC.Pager(server.subscriptions)]
@@ -296,11 +352,19 @@ def list_subscriptions(session: TableauSession) -> list[dict]:
     return session.call(_do)
 
 
+def delete_subscription(session: TableauSession, subscription_id: str) -> None:
+    session.call(lambda server: server.subscriptions.delete(subscription_id))
+
+
 def list_extract_tasks(session: TableauSession) -> list[dict]:
     def _do(server: TSC.Server):
         return [task_to_dict(t) for t in TSC.Pager(server.tasks)]
 
     return session.call(_do)
+
+
+def delete_extract_task(session: TableauSession, task_id: str) -> None:
+    session.call(lambda server: server.tasks.delete(task_id))
 
 
 def list_workbooks(session: TableauSession) -> list[dict]:

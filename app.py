@@ -146,6 +146,33 @@ def add_extract_task(body: ExtractTaskCreate):
     return {"id": new_id}
 
 
+# -- Deletes / actions on existing tasks & jobs ------------------------------
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str):
+    _run(tableau.cancel_job, _session, job_id)
+    return {"cancelled": job_id}
+
+
+@app.post("/api/extract-tasks/{task_id}/run")
+def run_extract_task(task_id: str):
+    job_id = _run(tableau.run_extract_task_now, _session, task_id)
+    return {"job_id": job_id}
+
+
+@app.delete("/api/extract-tasks/{task_id}")
+def delete_extract_task(task_id: str):
+    _run(tableau.delete_extract_task, _session, task_id)
+    return {"deleted": task_id}
+
+
+@app.delete("/api/subscriptions/{subscription_id}")
+def delete_subscription(subscription_id: str):
+    _run(tableau.delete_subscription, _session, subscription_id)
+    return {"deleted": subscription_id}
+
+
 # -- Chains -----------------------------------------------------------------
 
 

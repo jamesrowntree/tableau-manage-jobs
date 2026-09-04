@@ -83,7 +83,7 @@
       <p class="muted" x-show="jobFiltersActive">Showing <span x-text="filteredJobs.length"></span> of <span x-text="jobs.length"></span> jobs.</p>
 
       <table class="compact striped">
-        <thead><tr><th>Status</th><th>Type</th><th>ID</th><th>Title</th><th>Target</th><th>Reason</th><th>Finish</th><th>Mode</th><th>Progress</th><th>Created</th><th>Started</th><th>Ended</th></tr></thead>
+        <thead><tr><th>Status</th><th>Type</th><th>ID</th><th>Title</th><th>Target</th><th>Reason</th><th>Finish</th><th>Mode</th><th>Progress</th><th>Created</th><th>Started</th><th>Ended</th><th></th></tr></thead>
         <tbody>
           <template x-for="job in filteredJobs" :key="job.id">
             <tr>
@@ -99,10 +99,13 @@
               <td x-text="job.created_at || '—'"></td>
               <td x-text="job.started_at || '—'"></td>
               <td x-text="job.ended_at || '—'"></td>
+              <td>
+                <button class="outline" style="padding:0.1rem 0.5rem;" x-show="isCancellableStatus(job.status)" @click="cancelJob(job.id)">Cancel</button>
+              </td>
             </tr>
           </template>
-          <tr x-show="jobs.length === 0"><td colspan="12" class="muted">No jobs found.</td></tr>
-          <tr x-show="jobs.length > 0 && filteredJobs.length === 0"><td colspan="12" class="muted">No jobs match the current filters.</td></tr>
+          <tr x-show="jobs.length === 0"><td colspan="13" class="muted">No jobs found.</td></tr>
+          <tr x-show="jobs.length > 0 && filteredJobs.length === 0"><td colspan="13" class="muted">No jobs match the current filters.</td></tr>
         </tbody>
       </table>
     </section>
@@ -111,7 +114,7 @@
     <section x-show="view === 'tasks'">
       <h3>Subscriptions</h3>
       <table class="compact striped">
-        <thead><tr><th>Subject</th><th>Target</th><th>Frequency</th><th>Suspended</th></tr></thead>
+        <thead><tr><th>Subject</th><th>Target</th><th>Frequency</th><th>Suspended</th><th></th></tr></thead>
         <tbody>
           <template x-for="s in subscriptions" :key="s.id">
             <tr>
@@ -122,15 +125,19 @@
               </td>
               <td x-text="s.schedule_frequency || '—'"></td>
               <td x-text="s.suspended ? 'yes' : 'no'"></td>
+              <td style="white-space:nowrap;">
+                <button class="outline" style="padding:0.1rem 0.5rem;" @click="useSubscriptionSchedule(s)">Use this schedule&hellip;</button>
+                <button class="outline" style="padding:0.1rem 0.5rem;" @click="deleteSubscription(s.id)">Delete</button>
+              </td>
             </tr>
           </template>
-          <tr x-show="subscriptions.length === 0"><td colspan="4" class="muted">No subscriptions found.</td></tr>
+          <tr x-show="subscriptions.length === 0"><td colspan="5" class="muted">No subscriptions found.</td></tr>
         </tbody>
       </table>
 
       <h3>Extract refresh tasks</h3>
       <table class="compact striped">
-        <thead><tr><th>Target</th><th>Frequency</th><th>Last run</th><th>Consecutive failures</th></tr></thead>
+        <thead><tr><th>Target</th><th>Frequency</th><th>Last run</th><th>Consecutive failures</th><th></th></tr></thead>
         <tbody>
           <template x-for="t in extractTasks" :key="t.id">
             <tr>
@@ -141,9 +148,14 @@
               <td x-text="t.schedule_frequency || '—'"></td>
               <td x-text="t.last_run_at || 'never'"></td>
               <td x-text="t.consecutive_failed_count ?? '—'"></td>
+              <td style="white-space:nowrap;">
+                <button class="outline" style="padding:0.1rem 0.5rem;" @click="runTaskNow(t.id)">Run now</button>
+                <button class="outline" style="padding:0.1rem 0.5rem;" @click="useExtractTaskSchedule(t)">Use this schedule&hellip;</button>
+                <button class="outline" style="padding:0.1rem 0.5rem;" @click="deleteExtractTask(t.id)">Delete</button>
+              </td>
             </tr>
           </template>
-          <tr x-show="extractTasks.length === 0"><td colspan="4" class="muted">No extract refresh tasks found.</td></tr>
+          <tr x-show="extractTasks.length === 0"><td colspan="5" class="muted">No extract refresh tasks found.</td></tr>
         </tbody>
       </table>
     </section>
@@ -726,6 +738,112 @@
           if (status === 'Success') return 'tag-success';
           if (status === 'Failed' || status === 'Cancelled') return 'tag-fail';
           return 'tag-pending';
+        },
+        isCancellableStatus(status) {
+          return !['Success', 'Failed', 'Cancelled'].includes(status);
+        },
+
+        async deleteJson(url) {
+          const res = await fetch(url, { method: 'DELETE' });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || 'Request failed');
+          return data;
+        },
+
+        async cancelJob(jobId) {
+          if (!confirm('Cancel this job?')) return;
+          this.error = ''; this.notice = '';
+          try {
+            await this.postJson(`/api/jobs/${jobId}/cancel`, {});
+            this.notice = `Job ${jobId} cancelled.`;
+            await this.fetchJobs();
+          } catch (e) {
+            this.error = e.message;
+          }
+        },
+
+        async runTaskNow(taskId) {
+          this.error = ''; this.notice = '';
+          try {
+            const data = await this.postJson(`/api/extract-tasks/${taskId}/run`, {});
+            this.notice = `Task started (job ${data.job_id}).`;
+            await this.fetchJobs();
+          } catch (e) {
+            this.error = e.message;
+          }
+        },
+
+        async deleteExtractTask(taskId) {
+          if (!confirm('Delete this extract refresh task? This cannot be undone.')) return;
+          this.error = ''; this.notice = '';
+          try {
+            await this.deleteJson(`/api/extract-tasks/${taskId}`);
+            this.notice = 'Extract refresh task deleted.';
+            await this.fetchExtractTasks();
+          } catch (e) {
+            this.error = e.message;
+          }
+        },
+
+        async deleteSubscription(subscriptionId) {
+          if (!confirm('Delete this subscription? This cannot be undone.')) return;
+          this.error = ''; this.notice = '';
+          try {
+            await this.deleteJson(`/api/subscriptions/${subscriptionId}`);
+            this.notice = 'Subscription deleted.';
+            await this.fetchSubscriptions();
+          } catch (e) {
+            this.error = e.message;
+          }
+        },
+
+        // Copies a task/subscription's schedule params (see tableau.py's
+        // _interval_to_schedule_params) into the Add task form's schedule -
+        // target/content is deliberately left blank since "same schedule,
+        // new task" is the point; the frequency-specific fields on the form
+        // fill themselves in from what's shown here.
+        applyScheduleParams(scheduleObj, params) {
+          if (!params) return;
+          scheduleObj.frequency = params.frequency;
+          scheduleObj.weekDays = params.week_days || [];
+          if (params.start) scheduleObj.start = params.start.slice(0, 5);
+          if (params.end) scheduleObj.end = params.end.slice(0, 5);
+          if (params.frequency === 'Weekly') {
+            scheduleObj.weekDay = params.week_day || '';
+          } else if (params.frequency === 'Daily' && params.hours) {
+            scheduleObj.hours = params.hours;
+          } else if (params.frequency === 'Monthly') {
+            if (params.month_occurrence) {
+              scheduleObj.monthDayMode = 'occurrence';
+              scheduleObj.monthOccurrence = params.month_occurrence;
+              scheduleObj.weekDay = params.week_day || '';
+            } else if (params.month_day) {
+              scheduleObj.monthDayMode = 'day';
+              scheduleObj.monthDay = params.month_day;
+            }
+          }
+        },
+
+        useExtractTaskSchedule(t) {
+          this.taskType = 'extract';
+          this.extract.targetType = t.target_type || 'workbook';
+          this.extract.targetId = '';
+          this.applyScheduleParams(this.schedule, t.schedule_params);
+          this.view = 'add';
+          this.notice = t.schedule_params
+            ? "Schedule copied from the existing task — pick a target and refresh type, then create."
+            : "This task's schedule couldn't be read back; fill in the schedule manually.";
+        },
+
+        useSubscriptionSchedule(s) {
+          this.taskType = 'subscription';
+          this.sub.contentType = s.target_type || 'Workbook';
+          this.sub.contentId = '';
+          this.applyScheduleParams(this.schedule, s.schedule_params);
+          this.view = 'add';
+          this.notice = s.schedule_params
+            ? "Schedule copied from the existing subscription — pick content and a recipient, then create."
+            : "This subscription's schedule couldn't be read back; fill in the schedule manually.";
         },
 
         finishLabel(code) {
