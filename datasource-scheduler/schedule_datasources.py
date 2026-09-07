@@ -5,15 +5,22 @@ creates one extract-refresh task per row on Tableau Cloud. It is fully
 self-contained: it talks to the Tableau REST API directly with `httpx`. Credentials
 come from the same `.env` the app uses; targets come from a separate CSV.
 
-    python datasource-scheduler/schedule_datasources.py [path/to/list.csv]
+    python datasource-scheduler/schedule_datasources.py [--now] [path/to/list.csv]
 
 Defaults to datasource-scheduler/datasources.csv when no path is given. See that file for the
 column layout. Each datasource may be identified by name or by LUID.
 
+Modes:
+  - Default: create one recurring extract-refresh *schedule* per row, each using
+    that row's own frequency. Re-running the same CSV creates additional tasks
+    (it does not de-duplicate against existing ones).
+  - --now: skip scheduling entirely and trigger an *immediate* one-off extract
+    refresh for each row's datasource instead. The schedule columns are ignored
+    in this mode, and the script prints that it is running refreshes now rather
+    than creating schedules.
+
 Notes:
-  - This only *creates* schedules; it does not de-duplicate against existing
-    tasks, so re-running the same CSV creates additional tasks.
-  - Datasources only (no workbooks); schedule creation only (no run-now).
+  - Datasources only (no workbooks).
 """
 
 from __future__ import annotations
@@ -41,7 +48,9 @@ from dotenv import load_dotenv
 #        b. turn the row's cells into a payload   -> row_to_payload()
 #        c. build the inline <schedule> XML       -> build_schedule_xml()
 #        d. POST the new extract-refresh task      -> create_extract_task()
-#   6. Print an "N created, M failed" summary.
+#      (With --now, steps b-d are replaced by a single immediate-refresh call,
+#       run_extract_now(), which runs the extract once instead of scheduling it.)
+#   6. Print an "N done, M failed" summary.
 #
 # The file is organised in three sections below: (a) the schedule-XML builder,
 # (b) the Tableau REST calls, and (c) the CSV row handling + main().
@@ -421,6 +430,38 @@ def create_extract_task(
     return node.get("id", "") if node is not None else ""
 
 
+def run_extract_now(
+    server_url: str,
+    version: str,
+    site_id: str,
+    token: str,
+    *,
+    target_id: str,
+) -> str:
+    """Trigger an immediate one-off extract refresh for one datasource.
+
+    Returns the queued background job's id. This uses Tableau Cloud's "Update
+    Data Source Now" endpoint, which starts the refresh straight away and creates
+    NO recurring schedule — the opposite of create_extract_task(). An empty
+    <tsRequest/> body runs the datasource's standard refresh, so the CSV's
+    schedule columns (and refresh_type) don't apply here.
+    """
+    resp = httpx.post(
+        f"{server_url}/api/{version}/sites/{site_id}/datasources/{target_id}/refresh",
+        content=b"<tsRequest></tsRequest>",
+        headers={
+            "X-Tableau-Auth": token,
+            "Content-Type": "application/xml",
+            "Accept": "application/xml",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    # The queued refresh's id comes back as an attribute on <job>.
+    node = ET.fromstring(resp.content).find(".//t:job", NS)
+    return node.get("id", "") if node is not None else ""
+
+
 # ---------------------------------------------------------------------------
 # Section (c): CSV row handling + orchestration
 # ---------------------------------------------------------------------------
@@ -477,36 +518,74 @@ def row_to_payload(row: dict) -> dict:
     return payload
 
 
+def _parse_args(argv: list[str]) -> tuple[bool, Path]:
+    """Parse the CLI args into (run_now, csv_path).
+
+    Accepts an optional `--now` (alias `--run-now`) flag and an optional CSV path,
+    in any order. `-h`/`--help` prints the module docstring and exits. Anything
+    else beginning with '-' is rejected so typos don't get silently ignored.
+    """
+    run_now = False
+    positional: list[str] = []
+    for arg in argv:
+        if arg in ("--now", "--run-now"):
+            run_now = True
+        elif arg in ("-h", "--help"):
+            print(__doc__)
+            raise SystemExit(0)
+        elif arg.startswith("-"):
+            raise SystemExit(f"Unknown option: {arg} (use --now to run refreshes immediately)")
+        else:
+            positional.append(arg)
+    if len(positional) > 1:
+        raise SystemExit("Expected at most one CSV path argument")
+    csv_path = Path(positional[0]) if positional else DEFAULT_CSV
+    return run_now, csv_path
+
+
 def main() -> None:
-    """Wire the pieces together: sign in, then create one task per CSV row."""
-    # 1. Load .env from the repo root (works regardless of the current dir) and
+    """Wire the pieces together: sign in, then either schedule or run each row."""
+    # 1. Parse the CLI: optional --now flag plus an optional CSV path.
+    run_now, csv_path = _parse_args(sys.argv[1:])
+
+    # 2. Load .env from the repo root (works regardless of the current dir) and
     #    read/validate the connection settings.
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     cfg = load_config()
 
-    # 2. Resolve the list file (optional CLI arg, else the default next to us).
-    csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CSV
+    # 3. Make sure the list file exists before we bother signing in.
     if not csv_path.exists():
         raise SystemExit(f"Datasource list file not found: {csv_path}")
 
-    # 3. Discover the REST version and sign in.
+    # 4. Discover the REST version and sign in.
     site_label = cfg["site_content_url"] or "<default>"
     print(f"Signing in to {cfg['server_url']} (site: {site_label}) ...")
     version = discover_version(cfg["server_url"])
     token, site_id = sign_in(cfg["server_url"], version, cfg)
 
-    # 4. Fetch all datasources once and index them for fast row resolution.
+    # 5. Fetch all datasources once and index them for fast row resolution.
     datasources = list_datasources(cfg["server_url"], version, site_id, token)
     by_id = {d["id"]: d["name"] for d in datasources}
     by_name: dict[str, list[str]] = {}
     for d in datasources:
         by_name.setdefault(d["name"], []).append(d["id"])
-    print(f"Signed in OK (REST {version}). {len(datasources)} datasource(s) on site.\n")
+    print(f"Signed in OK (REST {version}). {len(datasources)} datasource(s) on site.")
 
-    # 5. Process each row independently (fail-soft): a bad row is reported and
+    # 5b. State plainly which of the two things is about to happen, so a --now run
+    #     can never be mistaken for scheduling (or vice versa).
+    if run_now:
+        print(
+            "RUN-NOW mode: triggering an IMMEDIATE one-off extract refresh for each "
+            "datasource.\nNo schedules are created — the schedule columns in the CSV "
+            "are ignored.\n"
+        )
+    else:
+        print("SCHEDULE mode: creating one recurring extract-refresh task per row.\n")
+
+    # 6. Process each row independently (fail-soft): a bad row is reported and
     #    skipped so one mistake never sinks the rest of the batch. Line numbers
     #    start at 2 because line 1 is the CSV header.
-    created = failed = 0
+    done = failed = 0
     with csv_path.open(newline="", encoding="utf-8") as fh:
         for lineno, row in enumerate(csv.DictReader(fh), start=2):
             identifier = (row.get("datasource") or "").strip()
@@ -514,28 +593,37 @@ def main() -> None:
                 continue  # blank line
             refresh_type = (row.get("refresh_type") or "").strip() or "FullRefresh"
             try:
-                # name/LUID -> id, cells -> payload, payload -> XML, XML -> task.
+                # Every row first resolves its name/LUID to a real datasource id.
                 luid, name = resolve(identifier, by_id, by_name)
-                payload = row_to_payload(row)
-                schedule_xml = build_schedule_xml(payload)
-                task_id = create_extract_task(
-                    cfg["server_url"],
-                    version,
-                    site_id,
-                    token,
-                    refresh_type=refresh_type,
-                    target_id=luid,
-                    schedule_xml=schedule_xml,
-                )
-                created += 1
-                print(f"  OK   line {lineno}: {name} [{payload.get('frequency', '?')}] -> task {task_id}")
+                if run_now:
+                    # Run the extract once, right now — no schedule is created.
+                    job_id = run_extract_now(
+                        cfg["server_url"], version, site_id, token, target_id=luid
+                    )
+                    done += 1
+                    print(f"  OK   line {lineno}: {name} -> refresh started now (job {job_id})")
+                else:
+                    # Build this row's inline schedule and create the recurring task.
+                    payload = row_to_payload(row)
+                    schedule_xml = build_schedule_xml(payload)
+                    task_id = create_extract_task(
+                        cfg["server_url"],
+                        version,
+                        site_id,
+                        token,
+                        refresh_type=refresh_type,
+                        target_id=luid,
+                        schedule_xml=schedule_xml,
+                    )
+                    done += 1
+                    print(f"  OK   line {lineno}: {name} [{payload.get('frequency', '?')}] -> task {task_id}")
             except ValueError as exc:
                 # Resolution or schedule-validation problem (ScheduleError is a
                 # ValueError too) — the row's own fault, report and continue.
                 failed += 1
                 print(f"  FAIL line {lineno}: {identifier} -> {exc}")
             except httpx.HTTPStatusError as exc:
-                # Tableau rejected the create call; surface its response body.
+                # Tableau rejected the call; surface its response body.
                 failed += 1
                 detail = (exc.response.text or "").strip().replace("\n", " ")[:300]
                 print(f"  FAIL line {lineno}: {identifier} -> HTTP {exc.response.status_code}: {detail}")
@@ -544,8 +632,9 @@ def main() -> None:
                 failed += 1
                 print(f"  FAIL line {lineno}: {identifier} -> {exc}")
 
-    # 6. Summary line; non-zero exit code if anything failed (handy for CI/cron).
-    print(f"\nDone: {created} created, {failed} failed.")
+    # 7. Summary line; non-zero exit code if anything failed (handy for CI/cron).
+    action = "refresh(es) started" if run_now else "task(s) created"
+    print(f"\nDone: {done} {action}, {failed} failed.")
     if failed:
         raise SystemExit(1)
 
