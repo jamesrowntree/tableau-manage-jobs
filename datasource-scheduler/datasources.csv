@@ -1,0 +1,7 @@
+datasource,refresh_type,frequency,start,end,hours,minutes,week_days,week_day,month_day,month_occurrence
+Sales Extract,FullRefresh,Daily,06:00:00,,24,,,,,
+Marketing Data,IncrementalExtract,Daily,06:00:00,22:00:00,4,,,,,
+a1b2c3d4-e5f6-7890-abcd-ef1234567890,FullRefresh,Weekly,,,,,,Monday,,
+Ops Metrics,FullRefresh,Hourly,06:00:00,18:00:00,1,,Monday;Wednesday;Friday,,,
+Finance Cube,FullRefresh,Monthly,,,,,,,1,
+Inventory,FullRefresh,Monthly,,,,,,Monday,,First

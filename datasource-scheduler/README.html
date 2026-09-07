@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bulk datasource extract-refresh scheduler — README</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1f2328;
+    --muted: #59636e;
+    --border: #d0d7de;
+    --code-bg: #f6f8fa;
+    --link: #0969da;
+    --accent: #eef6ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e6edf3;
+      --muted: #9198a1;
+      --border: #30363d;
+      --code-bg: #161b22;
+      --link: #4493f8;
+      --accent: #0d1b2e;
+    }
+    body { background: #0d1117; }
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--fg);
+    max-width: 780px;
+    margin: 2.5rem auto;
+    padding: 0 1.5rem 4rem;
+    line-height: 1.6;
+  }
+  h1, h2, h3, h4 { line-height: 1.25; }
+  h1 { font-size: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
+  h2 { font-size: 1.4rem; margin-top: 2.2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h3 { font-size: 1.15rem; margin-top: 1.6rem; }
+  a { color: var(--link); }
+  code {
+    background: var(--code-bg);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.9em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; }
+  blockquote {
+    margin: 1rem 0;
+    padding: 0.6rem 1rem;
+    background: var(--accent);
+    border-left: 4px solid var(--link);
+    border-radius: 4px;
+  }
+  blockquote p { margin: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid var(--border); padding: 0.5rem 0.7rem; text-align: left; }
+  th { background: var(--code-bg); }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: 0.25rem 0; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>Bulk datasource extract-refresh scheduler</h1>
+
+<p>A standalone command-line script that reads a list of Tableau Cloud data sources from a
+CSV file and creates <strong>one extract-refresh task per row</strong>, each with its
+<strong>own schedule</strong> taken from that row. It's the headless, batch counterpart to
+the web app's <em>Add multiple tasks</em> tab &mdash; but every data source can have a
+different cadence, and it runs entirely on its own.</p>
+
+<blockquote><p><strong>Note:</strong> This script is <strong>self-contained</strong>. It
+talks to the Tableau Cloud REST API directly with <code>httpx</code> and does
+<strong>not</strong> import the web app's modules, use <code>tableauserverclient</code>, or
+require the app to be running. It only shares the app's <code>.env</code> credentials
+file.</p></blockquote>
+
+<h2>What it does</h2>
+<ul>
+  <li>Reads a CSV list of data sources (<code>datasource-scheduler/datasources.csv</code> by default).</li>
+  <li>Signs in to Tableau Cloud with your Personal Access Token.</li>
+  <li>For each row, builds the inline Tableau Cloud schedule that row describes and creates a
+    new extract-refresh task for that data source.</li>
+  <li><strong>Fail-soft:</strong> a bad row (unknown data source, invalid schedule) is
+    reported and skipped; the rest still run. A final summary prints
+    <code>N created, M failed</code>, and the process exits non-zero if anything failed.</li>
+</ul>
+
+<p>Each data source can be identified <strong>by name or by LUID</strong>, and each row
+carries its own frequency, so you can schedule (for example) one source hourly, another
+daily at 6am, and a third on the first Monday of the month &mdash; all in one run.</p>
+
+<h2>Why it's separate from the app</h2>
+<p>The web app creates tasks one at a time through a browser form and uses
+<code>tableauserverclient</code> for its reads. This script is the <em>minimum viable
+code</em> for the single job of bulk-scheduling data sources, pulled out into one file so it
+can run anywhere with just <code>httpx</code> &mdash; no web server, no browser, no app
+process. It reuses the app's <code>.env</code> so you don't configure credentials twice.</p>
+
+<h2>How scheduling works</h2>
+<p>Tableau Cloud has <strong>no shared, reusable schedules</strong> (unlike Tableau Server):
+every extract-refresh task carries its own private, inline schedule defined at the moment the
+task is created. So this script builds one inline schedule per CSV row and attaches it to that
+row's new task. Ten rows on the same "daily at 6am" cadence produce ten separate tasks, each
+with its own copy of that schedule &mdash; exactly how Tableau Cloud itself models it.</p>
+
+<h2>The list file (<code>datasources.csv</code>)</h2>
+<p>A CSV with a header row and one data source per line. Fill in only the columns a given
+frequency needs; leave the rest blank. The <code>week_days</code> cell uses a semicolon
+(<code>;</code>) to separate multiple days, since commas are reserved by CSV.</p>
+
+<table>
+  <thead>
+    <tr><th>Column</th><th>Meaning</th><th>Used by</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>datasource</code></td><td>Data source <strong>name</strong> or <strong>LUID</strong></td><td>all rows</td></tr>
+    <tr><td><code>refresh_type</code></td><td><code>FullRefresh</code> (default) or <code>IncrementalExtract</code></td><td>all rows</td></tr>
+    <tr><td><code>frequency</code></td><td><code>Hourly</code>, <code>Daily</code>, <code>Weekly</code>, or <code>Monthly</code></td><td>all rows</td></tr>
+    <tr><td><code>start</code></td><td>Start time, <code>HH:MM:SS</code>, on a 5-minute boundary</td><td>Hourly, Daily</td></tr>
+    <tr><td><code>end</code></td><td>End time, <code>HH:MM:SS</code></td><td>Hourly; Daily when &lt; 24h</td></tr>
+    <tr><td><code>hours</code></td><td>Interval in hours</td><td>Hourly (<code>1</code>); Daily (<code>2</code>/<code>4</code>/<code>6</code>/<code>8</code>/<code>12</code>/<code>24</code>)</td></tr>
+    <tr><td><code>minutes</code></td><td><code>60</code> — alternative to <code>hours=1</code></td><td>Hourly</td></tr>
+    <tr><td><code>week_days</code></td><td>Extra day filters, <code>;</code>-separated, e.g. <code>Monday;Wednesday</code></td><td>Hourly, Daily (optional)</td></tr>
+    <tr><td><code>week_day</code></td><td>A single weekday</td><td>Weekly; Monthly occurrence pairing</td></tr>
+    <tr><td><code>month_day</code></td><td><code>1</code>–<code>31</code> or <code>LastDay</code></td><td>Monthly</td></tr>
+    <tr><td><code>month_occurrence</code></td><td><code>First</code>/<code>Second</code>/<code>Third</code>/<code>Fourth</code>/<code>Last</code> (paired with <code>week_day</code>)</td><td>Monthly</td></tr>
+  </tbody>
+</table>
+
+<h3>Frequency rules</h3>
+<ul>
+  <li><strong>Hourly</strong> &mdash; <code>hours=1</code> (or <code>minutes=60</code>);
+    <code>start</code> and <code>end</code> are required. Optional <code>week_days</code>
+    limit which days it runs.</li>
+  <li><strong>Daily</strong> &mdash; <code>hours</code> must be one of
+    <code>2, 4, 6, 8, 12, 24</code>; <code>start</code> is required; <code>end</code> is
+    required unless <code>hours=24</code>. Optional <code>week_days</code>.</li>
+  <li><strong>Weekly</strong> &mdash; exactly one <code>week_day</code>; no
+    <code>start</code>/<code>end</code>.</li>
+  <li><strong>Monthly</strong> &mdash; either a <code>month_day</code> (<code>1</code>–<code>31</code>
+    or <code>LastDay</code>), <strong>or</strong> a <code>month_occurrence</code> together with
+    a <code>week_day</code> (e.g. <code>First</code> + <code>Monday</code>).</li>
+  <li>Times must fall on 5-minute boundaries, and <code>end</code> − <code>start</code> must be
+    a positive multiple of 60 minutes.</li>
+</ul>
+
+<h3>Example</h3>
+<pre><code>datasource,refresh_type,frequency,start,end,hours,minutes,week_days,week_day,month_day,month_occurrence
+Sales Extract,FullRefresh,Daily,06:00:00,,24,,,,,
+Marketing Data,IncrementalExtract,Daily,06:00:00,22:00:00,4,,,,,
+a1b2c3d4-e5f6-7890-abcd-ef1234567890,FullRefresh,Weekly,,,,,,Monday,,
+Ops Metrics,FullRefresh,Hourly,06:00:00,18:00:00,1,,Monday;Wednesday;Friday,,,
+Finance Cube,FullRefresh,Monthly,,,,,,,1,
+Inventory,FullRefresh,Monthly,,,,,,Monday,,First</code></pre>
+
+<h3>Identifying data sources</h3>
+<ul>
+  <li>If a <code>datasource</code> value looks like a LUID (a UUID), it's used directly and
+    verified against the site.</li>
+  <li>Otherwise it's treated as a <strong>name</strong> and looked up. If <strong>no</strong>
+    data source has that name, or if <strong>more than one</strong> does, that row fails with a
+    clear message telling you to use the LUID instead &mdash; nothing is scheduled by guess.</li>
+</ul>
+
+<h2>Prerequisites</h2>
+<ul>
+  <li><strong>Python 3.10+</strong></li>
+  <li>A <strong>Tableau Cloud Personal Access Token (PAT)</strong> whose owner has the
+    <strong>Creator</strong> or <strong>Explorer</strong> site role (or Site Administrator)
+    &mdash; the role needed to create extract-refresh tasks.</li>
+  <li>The same connection details the web app uses (pod URL and site content URL).</li>
+</ul>
+<p>Only two third-party packages are needed &mdash; <code>httpx</code> and
+<code>python-dotenv</code> &mdash; both already listed in <code>requirements.txt</code>.</p>
+
+<h2>Setup</h2>
+<p>If you've already set up the web app, you're done &mdash; the script reuses the same
+<code>.env</code>. Otherwise:</p>
+<pre><code>python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# then edit .env and fill in your PAT name/secret, pod URL, and site content URL</code></pre>
+<p><code>.env</code> is listed in <code>.gitignore</code> and must never be committed.</p>
+
+<h2>Usage</h2>
+<pre><code>source .venv/bin/activate                                   # if not already active
+python datasource-scheduler/schedule_datasources.py         # uses datasource-scheduler/datasources.csv
+python datasource-scheduler/schedule_datasources.py my.csv  # or a custom list file</code></pre>
+<p>(You can also skip activation and call
+<code>.venv/bin/python datasource-scheduler/schedule_datasources.py</code>.)</p>
+
+<p><strong>Tip:</strong> start with a one-row CSV to confirm sign-in and see the returned task
+id before scheduling the whole batch.</p>
+
+<p>Example output:</p>
+<pre><code>Signing in to https://10ax.online.tableau.com (site: acme) ...
+Signed in OK (REST 3.24). 128 datasource(s) on site.
+
+  OK   line 2: Sales Extract [Daily] -> task 7f1e...c2
+  FAIL line 3: Marketing Data -> end minus start must be a positive multiple of 60 minutes
+  OK   line 4: a1b2c3d4-... [Weekly] -> task 90ab...11
+
+Done: 2 created, 1 failed.</code></pre>
+
+<h2>Notes and limitations</h2>
+<ul>
+  <li><strong>Creates only.</strong> It does not de-duplicate against existing tasks, so
+    re-running the same CSV creates additional tasks.</li>
+  <li><strong>Schedule only.</strong> It creates the recurring task; it does not trigger an
+    immediate first refresh.</li>
+  <li><strong>Data sources only</strong> &mdash; no workbooks.</li>
+  <li><strong>Shares the app's PAT.</strong> A Personal Access Token is single-use-at-a-time,
+    so running this script while the web app has an active session will invalidate that session
+    (it re-signs-in on its next call, and vice-versa). Run the script when the app isn't
+    mid-operation.</li>
+</ul>
+
+<h2>Files</h2>
+<pre><code>datasource-scheduler/
+├── schedule_datasources.py    This script (self-contained, httpx + stdlib)
+├── datasources.csv            The data source list it reads (edit this)
+├── README.md                  This document
+└── README.html                This document (HTML version)</code></pre>
+
+<h2>Built with</h2>
+<ul>
+  <li><a href="https://www.python-httpx.org/">httpx</a> &mdash; direct Tableau Cloud REST calls</li>
+  <li><a href="https://pypi.org/project/python-dotenv/">python-dotenv</a> &mdash; loads <code>.env</code></li>
+  <li>Python standard library (<code>csv</code>, <code>xml.etree.ElementTree</code>, …) &mdash; everything else</li>
+</ul>
+
+</body>
+</html>
