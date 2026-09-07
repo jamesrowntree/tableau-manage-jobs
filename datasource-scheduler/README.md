@@ -18,8 +18,11 @@ can have a different cadence, and it runs entirely on its own.
 - For each row, builds the inline Tableau Cloud schedule that row describes and
   creates a new extract-refresh task for that data source.
 - **Fail-soft:** a bad row (unknown data source, invalid schedule) is reported
-  and skipped; the rest still run. A final summary prints `N created, M failed`,
-  and the process exits non-zero if anything failed.
+  and skipped; the rest still run. A final summary line reports how many
+  succeeded and failed, and the process exits non-zero if anything failed.
+- **Run now instead:** pass `--now` to skip scheduling and trigger an immediate
+  one-off refresh for each datasource in the list (the schedule columns are
+  ignored). The script clearly announces this mode before it starts.
 
 Each data source can be identified **by name or by LUID**, and each row carries
 its own frequency, so you can schedule (for example) one source hourly, another
@@ -125,11 +128,30 @@ cp .env.example .env
 
 ```bash
 source .venv/bin/activate                                   # if not already active
-python datasource-scheduler/schedule_datasources.py         # uses datasource-scheduler/datasources.csv
-python datasource-scheduler/schedule_datasources.py my.csv  # or a custom list file
+python datasource-scheduler/schedule_datasources.py         # SCHEDULE: uses datasource-scheduler/datasources.csv
+python datasource-scheduler/schedule_datasources.py my.csv  # SCHEDULE: a custom list file
+python datasource-scheduler/schedule_datasources.py --now   # RUN NOW: refresh each datasource immediately (no schedule)
 ```
 
 (You can also skip activation and call `.venv/bin/python datasource-scheduler/schedule_datasources.py`.)
+
+### Run now instead of scheduling
+
+Pass `--now` to skip scheduling and instead trigger an **immediate one-off
+extract refresh** for each datasource in the list — like clicking *Refresh now*
+in Tableau. In this mode the schedule columns (`frequency`, `start`, …) are
+**ignored**; each row only needs its `datasource`. The script prints a clear
+`RUN-NOW mode` banner so you always know which action it's taking, and reports
+the queued job id per row:
+
+```
+RUN-NOW mode: triggering an IMMEDIATE one-off extract refresh for each datasource.
+No schedules are created — the schedule columns in the CSV are ignored.
+
+  OK   line 2: Sales Extract -> refresh started now (job 7f1e...c2)
+
+Done: 1 refresh(es) started, 0 failed.
+```
 
 **Tip:** start with a one-row CSV to confirm sign-in and see the returned task
 id before scheduling the whole batch.
@@ -151,8 +173,8 @@ Done: 2 created, 1 failed.
 
 - **Creates only.** It does not de-duplicate against existing tasks, so
   re-running the same CSV creates additional tasks.
-- **Schedule only.** It creates the recurring task; it does not trigger an
-  immediate first refresh.
+- **Two modes.** By default it creates a recurring schedule per row. Pass
+  `--now` to instead run a one-off refresh immediately (no schedule created).
 - **Data sources only** — no workbooks.
 - **Shares the app's PAT.** A Personal Access Token is single-use-at-a-time, so
   running this script while the web app has an active session will invalidate

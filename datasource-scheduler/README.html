@@ -92,8 +92,11 @@ file.</p></blockquote>
   <li>For each row, builds the inline Tableau Cloud schedule that row describes and creates a
     new extract-refresh task for that data source.</li>
   <li><strong>Fail-soft:</strong> a bad row (unknown data source, invalid schedule) is
-    reported and skipped; the rest still run. A final summary prints
-    <code>N created, M failed</code>, and the process exits non-zero if anything failed.</li>
+    reported and skipped; the rest still run. A final summary line reports how many
+    succeeded and failed, and the process exits non-zero if anything failed.</li>
+  <li><strong>Run now instead:</strong> pass <code>--now</code> to skip scheduling and
+    trigger an immediate one-off refresh for each datasource in the list (the schedule
+    columns are ignored). The script clearly announces this mode before it starts.</li>
 </ul>
 
 <p>Each data source can be identified <strong>by name or by LUID</strong>, and each row
@@ -197,10 +200,26 @@ cp .env.example .env
 
 <h2>Usage</h2>
 <pre><code>source .venv/bin/activate                                   # if not already active
-python datasource-scheduler/schedule_datasources.py         # uses datasource-scheduler/datasources.csv
-python datasource-scheduler/schedule_datasources.py my.csv  # or a custom list file</code></pre>
+python datasource-scheduler/schedule_datasources.py         # SCHEDULE: uses datasource-scheduler/datasources.csv
+python datasource-scheduler/schedule_datasources.py my.csv  # SCHEDULE: a custom list file
+python datasource-scheduler/schedule_datasources.py --now   # RUN NOW: refresh each datasource immediately (no schedule)</code></pre>
 <p>(You can also skip activation and call
 <code>.venv/bin/python datasource-scheduler/schedule_datasources.py</code>.)</p>
+
+<h3>Run now instead of scheduling</h3>
+<p>Pass <code>--now</code> to skip scheduling and instead trigger an
+<strong>immediate one-off extract refresh</strong> for each datasource in the list
+&mdash; like clicking <em>Refresh now</em> in Tableau. In this mode the schedule
+columns (<code>frequency</code>, <code>start</code>, …) are <strong>ignored</strong>;
+each row only needs its <code>datasource</code>. The script prints a clear
+<code>RUN-NOW mode</code> banner so you always know which action it's taking, and
+reports the queued job id per row:</p>
+<pre><code>RUN-NOW mode: triggering an IMMEDIATE one-off extract refresh for each datasource.
+No schedules are created — the schedule columns in the CSV are ignored.
+
+  OK   line 2: Sales Extract -> refresh started now (job 7f1e...c2)
+
+Done: 1 refresh(es) started, 0 failed.</code></pre>
 
 <p><strong>Tip:</strong> start with a one-row CSV to confirm sign-in and see the returned task
 id before scheduling the whole batch.</p>
@@ -219,8 +238,8 @@ Done: 2 created, 1 failed.</code></pre>
 <ul>
   <li><strong>Creates only.</strong> It does not de-duplicate against existing tasks, so
     re-running the same CSV creates additional tasks.</li>
-  <li><strong>Schedule only.</strong> It creates the recurring task; it does not trigger an
-    immediate first refresh.</li>
+  <li><strong>Two modes.</strong> By default it creates a recurring schedule per row. Pass
+    <code>--now</code> to instead run a one-off refresh immediately (no schedule created).</li>
   <li><strong>Data sources only</strong> &mdash; no workbooks.</li>
   <li><strong>Shares the app's PAT.</strong> A Personal Access Token is single-use-at-a-time,
     so running this script while the web app has an active session will invalidate that session
